@@ -1,0 +1,23 @@
+[
+  {
+    "name": "meta historical block",
+    "query": "{ _meta(block: { number: 10845898 }) { block { number hash } hasIndexingErrors } }"
+  },
+  {
+    "name": "historical purchase list",
+    "query": "{ purchases(block: { number: 10845898 }, first: 1, orderBy: block, orderDirection: asc) { id block transactionHash } }"
+  },
+  {
+    "name": "campaign relation",
+    "query": "{ purchases(block: { number: 10845898 }, first: 1) { id campaign { id } } }"
+  },
+  {
+    "name": "variables and where",
+    "query": "query($ids: [Bytes!]) { campaigns(block: { number: 10846000 }, where: { id_in: $ids }, orderBy: id, orderDirection: asc) { id producer { id } } }",
+    "variables": {
+      "ids": [
+        "0x59e24007a065eb99c8c8c0325287e359ea4f41de"
+      ]
+    }
+  }
+]

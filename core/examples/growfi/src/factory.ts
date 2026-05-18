@@ -1,0 +1,134 @@
+import { BigInt, Bytes, log } from "@graphprotocol/graph-ts";
+import {
+  CampaignCreated as CampaignCreatedEvent,
+  ProtocolFeeRecipientSet as ProtocolFeeRecipientSetEvent,
+  GrowfiContractsSet as GrowfiContractsSetEvent,
+  CampaignHiddenSet as CampaignHiddenSetEvent,
+} from "../generated/CampaignFactory/CampaignFactory";
+import {
+  Campaign as CampaignTemplate,
+  StakingVault as StakingVaultTemplate,
+  HarvestManager as HarvestManagerTemplate,
+} from "../generated/templates";
+import { Campaign, GlobalStats, ContractIndex, Protocol } from "../generated/schema";
+
+const GLOBAL_ID = Bytes.fromUTF8("global");
+const PROTOCOL_ID = Bytes.fromUTF8("protocol");
+
+export function loadOrCreateProtocol(): Protocol {
+  let p = Protocol.load(PROTOCOL_ID);
+  if (p == null) {
+    p = new Protocol(PROTOCOL_ID);
+  }
+  return p;
+}
+
+function loadOrCreateGlobalStats(): GlobalStats {
+  let stats = GlobalStats.load(GLOBAL_ID);
+  if (stats == null) {
+    stats = new GlobalStats(GLOBAL_ID);
+    stats.campaignCount = 0;
+    stats.userCount = 0;
+    stats.totalRaised = BigInt.zero();
+    stats.totalStakers = 0;
+  }
+  return stats;
+}
+
+export function handleCampaignCreated(event: CampaignCreatedEvent): void {
+  const campaignAddress = event.params.campaign;
+
+  const campaign = new Campaign(campaignAddress);
+  campaign.producer = event.params.producer;
+  campaign.campaignToken = event.params.campaignToken;
+  campaign.yieldToken = event.params.yieldToken;
+  campaign.stakingVault = event.params.stakingVault;
+  campaign.harvestManager = event.params.harvestManager;
+  campaign.pricePerToken = event.params.pricePerToken;
+  campaign.minCap = event.params.minCap;
+  campaign.maxCap = event.params.maxCap;
+  campaign.fundingDeadline = event.params.fundingDeadline;
+  campaign.seasonDuration = event.params.seasonDuration;
+  campaign.minProductClaim = event.params.minProductClaim;
+  campaign.expectedAnnualHarvestUsd = event.params.expectedAnnualHarvestUsd;
+  campaign.expectedAnnualHarvest = event.params.expectedAnnualHarvest;
+  campaign.firstHarvestYear = event.params.firstHarvestYear;
+  campaign.coverageHarvests = event.params.coverageHarvests;
+  campaign.collateralLocked = BigInt.zero();
+  campaign.collateralDrawn = BigInt.zero();
+  campaign.currentSupply = BigInt.zero();
+  campaign.totalStaked = BigInt.zero();
+  campaign.totalRaised = BigInt.zero();
+  campaign.treasuryRaised = BigInt.zero();
+  campaign.treasuryTokensOut = BigInt.zero();
+  campaign.currentYieldRate = BigInt.fromI32(5).times(
+    BigInt.fromI32(10).pow(18),
+  ); // 5x
+  campaign.currentSeasonId = BigInt.zero();
+  campaign.state = "Funding";
+  campaign.paused = false;
+  campaign.createdAt = event.params.createdAt;
+  campaign.createdAtBlock = event.block.number;
+  campaign.createdAtTx = event.transaction.hash;
+  campaign.metadataVersion = BigInt.zero();
+  campaign.hidden = false;
+  campaign.save();
+
+  // Register reverse lookup indices for the template handlers
+  const vaultIdx = new ContractIndex(event.params.stakingVault);
+  vaultIdx.campaign = campaignAddress;
+  vaultIdx.kind = "vault";
+  vaultIdx.save();
+
+  const harvestIdx = new ContractIndex(event.params.harvestManager);
+  harvestIdx.campaign = campaignAddress;
+  harvestIdx.kind = "harvest";
+  harvestIdx.save();
+
+  // Spawn dynamic templates for this campaign
+  CampaignTemplate.create(campaignAddress);
+  StakingVaultTemplate.create(event.params.stakingVault);
+  HarvestManagerTemplate.create(event.params.harvestManager);
+
+  // Update global stats
+  const stats = loadOrCreateGlobalStats();
+  stats.campaignCount = stats.campaignCount + 1;
+  stats.save();
+
+  log.info("Campaign created: {}", [campaignAddress.toHexString()]);
+}
+
+export function handleProtocolFeeRecipientSet(
+  event: ProtocolFeeRecipientSetEvent,
+): void {
+  log.info("Protocol fee recipient set to {}", [
+    event.params.recipient.toHexString(),
+  ]);
+}
+
+/// Captured so per-Campaign handlers can attribute a buy to the GROW Treasury
+/// (auto-allocation path) vs. a regular backer (direct funding). The 4 GROW
+/// addresses are written exactly once per deploy via `factory.setGrowfiContracts`.
+export function handleGrowfiContractsSet(event: GrowfiContractsSetEvent): void {
+  const p = loadOrCreateProtocol();
+  p.growToken = event.params.growfiToken;
+  p.growMinter = event.params.growfiMinter;
+  p.growTreasury = event.params.growfiTreasury;
+  p.growFeeSplitter = event.params.growfiFeeSplitter;
+  p.save();
+  log.info("Growfi contracts set, treasury={}", [
+    event.params.growfiTreasury.toHexString(),
+  ]);
+}
+
+export function handleCampaignHiddenSet(event: CampaignHiddenSetEvent): void {
+  const campaign = Campaign.load(event.params.campaign);
+  if (campaign == null) {
+    log.warning("CampaignHiddenSet for unknown campaign {}", [
+      event.params.campaign.toHexString(),
+    ]);
+    return;
+  }
+  campaign.hidden = event.params.hidden;
+  campaign.save();
+}

@@ -1,0 +1,28 @@
+[workspace]
+members = [
+  "crates/ugraph-core",
+  "crates/ugraph-runtime",
+  "crates/ugraph-cli"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/rifaisiciliadao/ugraph"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+thiserror = "2.0"
+hex = "0.4"
+num-bigint = "0.4"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+wasmparser = "0.229"
+wasmtime = "38"

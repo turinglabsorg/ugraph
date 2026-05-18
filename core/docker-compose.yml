@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ugraph
+      POSTGRES_USER: ugraph
+      POSTGRES_PASSWORD: ugraph
+    ports:
+      - "55432:5432"
+    volumes:
+      - ugraph-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ugraph -d ugraph"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  indexer:
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      UGRAPH_MODE: indexer
+      UGRAPH_STORAGE: postgres
+      UGRAPH_POSTGRES_URL: postgres://ugraph:ugraph@postgres:5432/ugraph
+      UGRAPH_DEPLOYMENT: growfi
+      UGRAPH_MANIFEST: /app/examples/growfi/subgraph.yaml
+      UGRAPH_RPC_URL: ${UGRAPH_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+      UGRAPH_CHAIN_ID: "11155111"
+      UGRAPH_POLL_INTERVAL_MS: ${UGRAPH_POLL_INTERVAL_MS:-1000}
+      UGRAPH_RETRY_MAX_MS: ${UGRAPH_RETRY_MAX_MS:-60000}
+      UGRAPH_REORG_POLICY: ${UGRAPH_REORG_POLICY:-rollback}
+      UGRAPH_REORG_CHECK_DEPTH: ${UGRAPH_REORG_CHECK_DEPTH:-64}
+      UGRAPH_HISTORY_LIMIT: ${UGRAPH_HISTORY_LIMIT:-1024}
+      UGRAPH_MAX_BLOCK_RANGE: ${UGRAPH_MAX_BLOCK_RANGE:-2000}
+      UGRAPH_RPC_RETRIES: ${UGRAPH_RPC_RETRIES:-3}
+      UGRAPH_SYNC_LIMIT: ${UGRAPH_SYNC_LIMIT:-1000}
+      UGRAPH_IPFS_GATEWAY: ${UGRAPH_IPFS_GATEWAY:-https://ipfs.io/ipfs/}
+      UGRAPH_IPFS_TIMEOUT_SECS: ${UGRAPH_IPFS_TIMEOUT_SECS:-60}
+      UGRAPH_MAX_IPFS_FILE_BYTES: ${UGRAPH_MAX_IPFS_FILE_BYTES:-26214400}
+      UGRAPH_FROM_BLOCK: ${UGRAPH_FROM_BLOCK:-10845295}
+      UGRAPH_TO_BLOCK: ${UGRAPH_TO_BLOCK:-}
+      UGRAPH_RESET: ${UGRAPH_RESET:-false}
+
+  api:
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      UGRAPH_MODE: serve
+      UGRAPH_STORAGE: postgres
+      UGRAPH_POSTGRES_URL: postgres://ugraph:ugraph@postgres:5432/ugraph
+      UGRAPH_DEPLOYMENT: growfi
+      UGRAPH_HOST: 0.0.0.0
+      UGRAPH_PORT: "8030"
+      UGRAPH_IPFS_GATEWAY: ${UGRAPH_IPFS_GATEWAY:-https://ipfs.io/ipfs/}
+      UGRAPH_IPFS_TIMEOUT_SECS: ${UGRAPH_IPFS_TIMEOUT_SECS:-60}
+      UGRAPH_MAX_IPFS_FILE_BYTES: ${UGRAPH_MAX_IPFS_FILE_BYTES:-26214400}
+    ports:
+      - "8030:8030"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8030/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  ugraph-postgres:
