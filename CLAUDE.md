@@ -26,13 +26,22 @@
   private|public`, `--owner-email`, and `--api-key`. API keys require `deploy`
   scope for deploy metadata writes; private GraphQL deployments require a
   `query`-scoped key through `Authorization: Bearer <key>` or `x-api-key`.
+- `ugraph deployments register` updates version/visibility/owner metadata for
+  an existing deployment without running a sync. Deployment ids are unique in
+  Postgres, so a name can only refer to one current deployment in a given
+  instance.
 - Implemented feed schema tables: `ugraph_feed_subscriptions`,
   `ugraph_raw_blocks`, and `ugraph_raw_logs`.
 - Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also
   forwards normal `ugraph` subcommands such as `deploy`, `chain-reader`, and
   `--help`.
-- GraphiQL is served from pinned React/GraphiQL assets and includes a built-in
-  fallback query UI if external assets fail.
+- The public homepage is served from `/` and `/status` as a terminal-style
+  status page. GraphiQL is served from pinned React/GraphiQL assets and
+  includes a built-in fallback query UI if external assets fail.
+- Hosted-provider query paths are supported at
+  `/subgraphs/<deployment>/<version>/gn` and
+  `/subgraphs/<deployment>/<version>/graphql`. `latest` aliases the current
+  deployment; explicit versions must match registered deployment metadata.
 - RPC, Chainlist registry, and mapping `ethereum.call` requests are bounded by
   `UGRAPH_RPC_TIMEOUT_SECS`.
 - When no explicit RPC is configured, `chain-reader` tries all resolved

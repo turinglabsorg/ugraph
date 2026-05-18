@@ -82,10 +82,16 @@
   two indexers cannot write the same single-subgraph instance concurrently.
 - `core serve` reloads the selected store on each GraphQL/health request, so
   API containers see indexer writes committed to Postgres without restart.
-- `core serve` exposes `/status` as a small HTML operational page and
-  `/metrics` in Prometheus text format.
+- `core serve` exposes `/` and `/status` as the public terminal-style
+  operational homepage, plus `/metrics` in Prometheus text format.
+- `core serve` accepts hosted-provider compatible versioned query paths:
+  `/subgraphs/<deployment>/<version>/gn` and
+  `/subgraphs/<deployment>/<version>/graphql`. The deployment name must match
+  the selected `UGRAPH_DEPLOYMENT`, `latest` aliases the current deployment,
+  and explicit versions must match the registered deployment metadata.
 - `core serve` serves GraphiQL with pinned React/GraphiQL assets and a built-in
-  fallback query UI if external assets fail.
+  fallback query UI if external assets fail. When opened from a versioned path,
+  GraphiQL posts queries back to that same versioned endpoint.
 - `core conformance` runs batch GraphQL diffs against Goldsky/Graph Node from
   JSON case files. GrowFi cases live in `core/examples/growfi/conformance.json`.
 - `core matrix` is the repeatable compatibility report command. It runs
@@ -116,8 +122,10 @@
   API key prefix used for the deploy. API keys with `deploy` scope can create
   or update deploy metadata; private GraphQL deployments require a key with
   `query` scope.
-- `core deployments` lists deployment ownership/version metadata and can change
-  a deployment's query visibility.
+- `core deployments` lists deployment ownership/version metadata, can register
+  or update the current version label without running a sync, and can change a
+  deployment's query visibility. Deployment ids are unique Postgres primary
+  keys; a name can only refer to one current deployment in a given instance.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`

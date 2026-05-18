@@ -165,6 +165,21 @@ enum DeploymentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Register or update deployment metadata without running a sync.
+    Register {
+        #[arg(long)]
+        deployment: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long, value_enum, default_value = "private")]
+        visibility: DeploymentVisibility,
+        #[arg(long)]
+        owner_email: Option<String>,
+        #[arg(long, env = "UGRAPH_API_KEY")]
+        api_key: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Change deployment query visibility.
     SetVisibility {
         #[arg(long)]
@@ -1518,6 +1533,42 @@ fn main() -> anyhow::Result<()> {
                             deployment.updated_at
                         );
                     }
+                }
+            }
+            DeploymentCommand::Register {
+                deployment,
+                version,
+                visibility,
+                owner_email,
+                api_key,
+                json,
+            } => {
+                if let Some(key) = api_key.as_deref() {
+                    storage::verify_api_key_scope(&postgres_url, key, "deploy")?
+                        .context("api key is invalid, revoked, or missing deploy scope")?;
+                }
+                let metadata = storage::record_deployment_metadata(
+                    &postgres_url,
+                    &deployment,
+                    version.as_deref(),
+                    visibility.as_str(),
+                    owner_email.as_deref(),
+                    api_key.as_deref(),
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&metadata)?);
+                } else {
+                    println!("deployment: {}", metadata.deployment);
+                    println!(
+                        "version: {}",
+                        metadata.version_label.as_deref().unwrap_or("<none>")
+                    );
+                    println!("visibility: {}", metadata.visibility);
+                    println!(
+                        "owner: {}",
+                        metadata.owner_email.as_deref().unwrap_or("<none>")
+                    );
+                    println!("updatedAt: {}", metadata.updated_at);
                 }
             }
             DeploymentCommand::SetVisibility {

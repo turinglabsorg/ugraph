@@ -49,6 +49,7 @@ cargo run -p ugraph -- users --postgres-url <postgres-url> signup status
 cargo run -p ugraph -- users --postgres-url <postgres-url> signup disable
 cargo run -p ugraph -- deploy --provider local --manifest examples/growfi/subgraph.yaml --storage postgres --postgres-url <postgres-url> --deployment growfi --version v1 --visibility public --api-key <ugraph-api-key> --chain-id 11155111 --rpc-url <rpc>
 cargo run -p ugraph -- deployments --postgres-url <postgres-url> list
+cargo run -p ugraph -- deployments --postgres-url <postgres-url> register --deployment growfi --version v1 --visibility public
 cargo run -p ugraph -- deployments --postgres-url <postgres-url> set-visibility --deployment growfi --visibility private
 cargo run -p ugraph -- serve --storage postgres --deployment growfi --postgres-url <postgres-url> --port 8030
 cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml
@@ -91,7 +92,9 @@ UGRAPH_PORT=8030
 The image uses the same binary for the API and indexer:
 
 - `UGRAPH_MODE=serve` exposes `/graphql`, `/`, `/status`, `/healthz`, and
-  `/metrics`.
+  `/metrics`. It also accepts hosted-provider compatible query paths at
+  `/subgraphs/<deployment>/<version>/gn` and
+  `/subgraphs/<deployment>/<version>/graphql`.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
 - `UGRAPH_MODE=chain-reader` reads one `chain_id` from RPC and writes raw logs
   into Postgres for every registered subscription on that chain. If no explicit
@@ -145,6 +148,12 @@ When Postgres storage is used, `deploy` also records deployment metadata:
 version label, visibility, owner, and the API key that created or updated the
 deployment.
 
+Deployment ids are unique in a Postgres-backed instance. The versioned query
+paths accept only the selected deployment name. `latest` aliases the current
+deployment, while explicit version labels must match registered metadata. Use
+`ugraph deployments register` to update version or visibility metadata without
+running a sync.
+
 ## Users and API keys
 
 Postgres is the identity source for the core control plane. Users are keyed by
@@ -180,6 +189,10 @@ are open, deployments marked `private` require an API key with `query` scope.
 Deployments without metadata remain public so existing local and cloud
 instances are not locked out during upgrades.
 
+GraphiQL is available at `/graphql` and can also be opened from a versioned
+endpoint such as `/subgraphs/growfi/v1/gn`; in that case it posts queries back
+to the same endpoint.
+
 ## Current Scope
 
 The first milestone is compatibility plumbing:
@@ -201,10 +214,10 @@ The first milestone is compatibility plumbing:
 - Prevent two Postgres-backed indexers from syncing the same deployment
   concurrently with a session-level advisory lock.
 - Serve GraphQL and GraphiQL from the current-state snapshot through `serve`.
-  The query endpoint supports POST/GET `/graphql`, CORS preflight,
-  `operationName`, variables, `where`, nested relations, `@derivedFrom`,
-  ordering, pagination, named fragments, inline fragments, `@include`,
-  `@skip`, `_meta`, and generated schema introspection.
+  The query endpoint supports POST/GET `/graphql`, Graph Node/Goldsky-style
+  versioned paths, CORS preflight, `operationName`, variables, `where`, nested
+  relations, `@derivedFrom`, ordering, pagination, named fragments, inline
+  fragments, `@include`, `@skip`, `_meta`, and generated schema introspection.
 - Run batch hosted-provider diffs through `conformance` using JSON case files.
 - Run `matrix` as the repeatable compatibility gate. It emits one report that
   combines structural `doctor`, optional bounded sync, and optional hosted

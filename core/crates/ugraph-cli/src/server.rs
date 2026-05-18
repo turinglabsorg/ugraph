@@ -17,8 +17,16 @@ use crate::{
 
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct GraphqlEndpoint<'a> {
+    path: &'a str,
+    deployment: Option<&'a str>,
+    version: Option<&'a str>,
+}
+
 pub fn serve_store(store: SnapshotStore, bind: &str, once: bool) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
+    println!("UGraph status: http://{bind}/");
     println!("GraphiQL: http://{bind}/graphql");
     for stream in listener.incoming() {
         let stream = stream.with_context(|| format!("accepting connection on {bind}"))?;
@@ -81,163 +89,256 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
         .map(|(path, query)| (path, Some(query)))
         .unwrap_or((target, None));
 
-    match (method, path) {
-        ("OPTIONS", _) => write_response(&mut stream, "204 No Content", "text/plain", b""),
-        ("GET", "/") => write_response(
+    if method == "OPTIONS" {
+        return write_response(&mut stream, "204 No Content", "text/plain", b"");
+    }
+    if method == "GET" && (path == "/" || path == "/status") {
+        let (status, snapshot) = match store.load() {
+            Ok(snapshot) => ("200 OK", Some(snapshot)),
+            Err(_) => ("503 Service Unavailable", None),
+        };
+        let metadata = deployment_metadata_for_store(store).ok().flatten();
+        return write_response(
             &mut stream,
-            "200 OK",
+            status,
             "text/html; charset=utf-8",
-            graphiql_html().as_bytes(),
-        ),
-        ("GET", "/status") => {
-            let (status, snapshot) = match store.load() {
-                Ok(snapshot) => ("200 OK", Some(snapshot)),
-                Err(_) => ("503 Service Unavailable", None),
-            };
-            write_response(
-                &mut stream,
-                status,
-                "text/html; charset=utf-8",
-                status_html(store, snapshot.as_ref()).as_bytes(),
-            )
-        }
-        ("GET", "/graphql") => {
-            if let Some(query_string) = query_string {
-                let params = parse_query_params(query_string);
-                if let Some(query) = params.get("query") {
-                    match graphql_authorized(store, &headers) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return write_json_status(
-                                &mut stream,
-                                "401 Unauthorized",
-                                &json!({ "errors": [{ "message": "api key required" }] }),
-                            );
-                        }
-                        Err(error) => {
-                            return write_json_status(
-                                &mut stream,
-                                "503 Service Unavailable",
-                                &json!({ "errors": [{ "message": error.to_string() }] }),
-                            );
-                        }
-                    }
-                    return match store.load() {
-                        Ok(snapshot) => {
-                            let variables = params
-                                .get("variables")
-                                .and_then(|raw| serde_json::from_str(raw).ok())
-                                .unwrap_or(serde_json::Value::Null);
-                            let response = execute_graphql_with_operation(
-                                &snapshot,
-                                query,
-                                &variables,
-                                params.get("operationName").map(String::as_str),
-                            );
-                            write_json(&mut stream, &response)
-                        }
-                        Err(error) => write_json_status(
-                            &mut stream,
-                            "503 Service Unavailable",
-                            &json!({ "errors": [{ "message": error.to_string() }] }),
-                        ),
-                    };
-                }
+            home_html(store, snapshot.as_ref(), metadata.as_ref()).as_bytes(),
+        );
+    }
+    if method == "GET" && path == "/healthz" {
+        return write_healthz(&mut stream, store);
+    }
+    if method == "GET" && path == "/metrics" {
+        return write_metrics(&mut stream, store);
+    }
+    if let Some(endpoint) = graphql_endpoint(path) {
+        match graphql_endpoint_allowed(store, endpoint) {
+            Ok(true) => {}
+            Ok(false) => {
+                return write_response(
+                    &mut stream,
+                    "404 Not Found",
+                    "application/json",
+                    br#"{"errors":[{"message":"subgraph version not found"}]}"#,
+                );
             }
-            write_response(
-                &mut stream,
-                "200 OK",
-                "text/html; charset=utf-8",
-                graphiql_html().as_bytes(),
-            )
-        }
-        ("GET", "/healthz") => match store.load() {
-            Ok(snapshot) => write_json(
-                &mut stream,
-                &json!({
-                    "ok": true,
-                    "store": store.label(),
-                    "entities": snapshot.entities.len(),
-                    "dynamicSources": snapshot.dynamic_sources.len(),
-                    "historySnapshots": snapshot.history.len(),
-                    "historyEarliestBlock": history_earliest_block(&snapshot),
-                    "historyLatestBlock": history_latest_block(&snapshot),
-                    "toBlock": snapshot.checkpoint.to_block,
-                    "blockHash": snapshot.checkpoint.block_hash,
-                    "complete": snapshot.checkpoint.complete,
-                    "validationErrors": snapshot.checkpoint.validation_errors,
-                }),
-            ),
-            Err(error) => write_json_status(
-                &mut stream,
-                "503 Service Unavailable",
-                &json!({
-                    "ok": false,
-                    "store": store.label(),
-                    "error": error.to_string(),
-                }),
-            ),
-        },
-        ("GET", "/metrics") => match store.load() {
-            Ok(snapshot) => write_response(
-                &mut stream,
-                "200 OK",
-                "text/plain; version=0.0.4; charset=utf-8",
-                metrics_text(store, &snapshot).as_bytes(),
-            ),
-            Err(_) => write_response(
-                &mut stream,
-                "200 OK",
-                "text/plain; version=0.0.4; charset=utf-8",
-                unavailable_metrics_text(store).as_bytes(),
-            ),
-        },
-        ("POST", "/graphql") => {
-            match graphql_authorized(store, &headers) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return write_json_status(
-                        &mut stream,
-                        "401 Unauthorized",
-                        &json!({ "errors": [{ "message": "api key required" }] }),
-                    );
-                }
-                Err(error) => {
-                    return write_json_status(
-                        &mut stream,
-                        "503 Service Unavailable",
-                        &json!({ "errors": [{ "message": error.to_string() }] }),
-                    );
-                }
-            }
-            let payload =
-                serde_json::from_slice::<GraphqlHttpRequest>(body).unwrap_or(GraphqlHttpRequest {
-                    query: String::new(),
-                    variables: serde_json::Value::Null,
-                    _operation_name: None,
-                });
-            match store.load() {
-                Ok(snapshot) => {
-                    let response = execute_graphql_with_operation(
-                        &snapshot,
-                        &payload.query,
-                        &payload.variables,
-                        payload._operation_name.as_deref(),
-                    );
-                    write_json(&mut stream, &response)
-                }
-                Err(error) => write_json_status(
+            Err(error) => {
+                return write_json_status(
                     &mut stream,
                     "503 Service Unavailable",
                     &json!({ "errors": [{ "message": error.to_string() }] }),
-                ),
+                );
             }
         }
-        _ => write_response(
-            &mut stream,
-            "404 Not Found",
-            "application/json",
-            br#"{"errors":[{"message":"not found"}]}"#,
+        return match method {
+            "GET" => handle_graphql_get(&mut stream, store, &headers, endpoint, query_string),
+            "POST" => handle_graphql_post(&mut stream, store, &headers, body),
+            _ => write_response(
+                &mut stream,
+                "405 Method Not Allowed",
+                "application/json",
+                br#"{"errors":[{"message":"method not allowed"}]}"#,
+            ),
+        };
+    }
+    write_response(
+        &mut stream,
+        "404 Not Found",
+        "application/json",
+        br#"{"errors":[{"message":"not found"}]}"#,
+    )
+}
+
+fn graphql_endpoint_allowed(
+    store: &SnapshotStore,
+    endpoint: GraphqlEndpoint<'_>,
+) -> anyhow::Result<bool> {
+    let Some(requested_deployment) = endpoint.deployment else {
+        return Ok(true);
+    };
+    if requested_deployment != deployment_name(store) {
+        return Ok(false);
+    }
+    let Some(requested_version) = endpoint.version else {
+        return Ok(true);
+    };
+    if requested_version == "latest" {
+        return Ok(true);
+    }
+    Ok(deployment_metadata_for_store(store)?
+        .and_then(|metadata| metadata.version_label)
+        .as_deref()
+        == Some(requested_version))
+}
+
+fn graphql_endpoint(path: &str) -> Option<GraphqlEndpoint<'_>> {
+    if path == "/graphql" {
+        return Some(GraphqlEndpoint {
+            path,
+            deployment: None,
+            version: None,
+        });
+    }
+    let mut parts = path.trim_matches('/').split('/');
+    let prefix = parts.next()?;
+    let deployment = parts.next()?;
+    let version = parts.next()?;
+    let suffix = parts.next()?;
+    if parts.next().is_some() || prefix != "subgraphs" || (suffix != "gn" && suffix != "graphql") {
+        return None;
+    }
+    Some(GraphqlEndpoint {
+        path,
+        deployment: Some(deployment),
+        version: Some(version),
+    })
+}
+
+fn handle_graphql_get(
+    stream: &mut TcpStream,
+    store: &SnapshotStore,
+    headers: &BTreeMap<String, String>,
+    endpoint: GraphqlEndpoint<'_>,
+    query_string: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(query_string) = query_string {
+        let params = parse_query_params(query_string);
+        if let Some(query) = params.get("query") {
+            if !write_if_graphql_unauthorized(stream, store, headers)? {
+                return Ok(());
+            }
+            return match store.load() {
+                Ok(snapshot) => {
+                    let variables = params
+                        .get("variables")
+                        .and_then(|raw| serde_json::from_str(raw).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    let response = execute_graphql_with_operation(
+                        &snapshot,
+                        query,
+                        &variables,
+                        params.get("operationName").map(String::as_str),
+                    );
+                    write_json(stream, &response)
+                }
+                Err(error) => write_json_status(
+                    stream,
+                    "503 Service Unavailable",
+                    &json!({ "errors": [{ "message": error.to_string() }] }),
+                ),
+            };
+        }
+    }
+    write_response(
+        stream,
+        "200 OK",
+        "text/html; charset=utf-8",
+        graphiql_html(endpoint.path).as_bytes(),
+    )
+}
+
+fn handle_graphql_post(
+    stream: &mut TcpStream,
+    store: &SnapshotStore,
+    headers: &BTreeMap<String, String>,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    if !write_if_graphql_unauthorized(stream, store, headers)? {
+        return Ok(());
+    }
+    let payload =
+        serde_json::from_slice::<GraphqlHttpRequest>(body).unwrap_or(GraphqlHttpRequest {
+            query: String::new(),
+            variables: serde_json::Value::Null,
+            _operation_name: None,
+        });
+    match store.load() {
+        Ok(snapshot) => {
+            let response = execute_graphql_with_operation(
+                &snapshot,
+                &payload.query,
+                &payload.variables,
+                payload._operation_name.as_deref(),
+            );
+            write_json(stream, &response)
+        }
+        Err(error) => write_json_status(
+            stream,
+            "503 Service Unavailable",
+            &json!({ "errors": [{ "message": error.to_string() }] }),
+        ),
+    }
+}
+
+fn write_if_graphql_unauthorized(
+    stream: &mut TcpStream,
+    store: &SnapshotStore,
+    headers: &BTreeMap<String, String>,
+) -> anyhow::Result<bool> {
+    match graphql_authorized(store, headers) {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            write_json_status(
+                stream,
+                "401 Unauthorized",
+                &json!({ "errors": [{ "message": "api key required" }] }),
+            )?;
+            Ok(false)
+        }
+        Err(error) => {
+            write_json_status(
+                stream,
+                "503 Service Unavailable",
+                &json!({ "errors": [{ "message": error.to_string() }] }),
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+fn write_healthz(stream: &mut TcpStream, store: &SnapshotStore) -> anyhow::Result<()> {
+    match store.load() {
+        Ok(snapshot) => write_json(
+            stream,
+            &json!({
+                "ok": true,
+                "store": store.label(),
+                "entities": snapshot.entities.len(),
+                "dynamicSources": snapshot.dynamic_sources.len(),
+                "historySnapshots": snapshot.history.len(),
+                "historyEarliestBlock": history_earliest_block(&snapshot),
+                "historyLatestBlock": history_latest_block(&snapshot),
+                "toBlock": snapshot.checkpoint.to_block,
+                "blockHash": snapshot.checkpoint.block_hash,
+                "complete": snapshot.checkpoint.complete,
+                "validationErrors": snapshot.checkpoint.validation_errors,
+            }),
+        ),
+        Err(error) => write_json_status(
+            stream,
+            "503 Service Unavailable",
+            &json!({
+                "ok": false,
+                "store": store.label(),
+                "error": error.to_string(),
+            }),
+        ),
+    }
+}
+
+fn write_metrics(stream: &mut TcpStream, store: &SnapshotStore) -> anyhow::Result<()> {
+    match store.load() {
+        Ok(snapshot) => write_response(
+            stream,
+            "200 OK",
+            "text/plain; version=0.0.4; charset=utf-8",
+            metrics_text(store, &snapshot).as_bytes(),
+        ),
+        Err(_) => write_response(
+            stream,
+            "200 OK",
+            "text/plain; version=0.0.4; charset=utf-8",
+            unavailable_metrics_text(store).as_bytes(),
         ),
     }
 }
@@ -355,6 +456,24 @@ fn request_api_key(headers: &BTreeMap<String, String>) -> Option<&str> {
         .or_else(|| value.strip_prefix("bearer "))
 }
 
+fn deployment_name(store: &SnapshotStore) -> &str {
+    match store {
+        SnapshotStore::Postgres { deployment, .. } => deployment,
+        SnapshotStore::Json { .. } => "default",
+    }
+}
+
+fn deployment_metadata_for_store(
+    store: &SnapshotStore,
+) -> anyhow::Result<Option<storage::DeploymentMetadataRecord>> {
+    match store {
+        SnapshotStore::Postgres { url, deployment } => {
+            storage::deployment_metadata(url, deployment)
+        }
+        SnapshotStore::Json { .. } => Ok(None),
+    }
+}
+
 fn metrics_text(store: &SnapshotStore, snapshot: &StoreSnapshot) -> String {
     let store = prometheus_label_value(&store.label());
     let complete = usize::from(snapshot.checkpoint.complete);
@@ -419,13 +538,31 @@ fn prometheus_label_value(value: &str) -> String {
         .replace('\n', r"\n")
 }
 
-fn status_html(store: &SnapshotStore, snapshot: Option<&StoreSnapshot>) -> String {
-    let ok = snapshot.is_some();
-    let status = if ok { "operational" } else { "unavailable" };
+fn home_html(
+    store: &SnapshotStore,
+    snapshot: Option<&StoreSnapshot>,
+    metadata: Option<&storage::DeploymentMetadataRecord>,
+) -> String {
+    let ok = snapshot
+        .map(|snapshot| snapshot.checkpoint.complete && snapshot.checkpoint.validation_errors == 0)
+        .unwrap_or(false);
+    let status = if ok { "OPERATIONAL" } else { "DEGRADED" };
     let badge = if ok { "ok" } else { "down" };
+    let deployment = deployment_name(store);
+    let version = metadata
+        .and_then(|metadata| metadata.version_label.as_deref())
+        .unwrap_or("latest");
+    let visibility = metadata
+        .map(|metadata| metadata.visibility.as_str())
+        .unwrap_or("public");
+    let versioned_endpoint = format!("/subgraphs/{deployment}/{version}/gn");
+    let latest_endpoint = format!("/subgraphs/{deployment}/latest/gn");
     let to_block = snapshot
         .map(|snapshot| snapshot.checkpoint.to_block.to_string())
         .unwrap_or_else(|| "-".to_string());
+    let block_hash = snapshot
+        .and_then(|snapshot| snapshot.checkpoint.block_hash.as_deref())
+        .unwrap_or("-");
     let entities = snapshot
         .map(|snapshot| snapshot.entities.len().to_string())
         .unwrap_or_else(|| "-".to_string());
@@ -456,62 +593,113 @@ fn status_html(store: &SnapshotStore, snapshot: Option<&StoreSnapshot>) -> Strin
   <meta http-equiv="refresh" content="10">
   <title>UGraph Status</title>
   <style>
-    :root {{ color-scheme: light; --text:#171717; --muted:#666; --line:#ebebeb; --ok:#0070f3; --down:#c1121f; --bg:#fff; --soft:#fafafa; }}
+    :root {{ color-scheme: dark; --bg:#11100e; --ink:#f7f1df; --muted:#a9a08d; --line:#3a352c; --panel:#181611; --panel-2:#211e18; --ok:#46f08c; --warn:#ffb84a; --red:#ff5f56; }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing:0; }}
-    main {{ max-width: 860px; margin: 0 auto; padding: 56px 20px; }}
-    header {{ display:flex; justify-content:space-between; align-items:flex-start; gap:24px; padding-bottom:28px; border-bottom:1px solid var(--line); }}
-    h1 {{ margin:0; font-size:32px; line-height:1.15; font-weight:650; letter-spacing:0; }}
-    .store {{ margin-top:8px; color:var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:13px; }}
-    .badge {{ display:inline-flex; align-items:center; gap:8px; border-radius:999px; padding:6px 10px; font-size:13px; font-weight:600; box-shadow:0 0 0 1px rgba(0,0,0,.08); }}
-    .dot {{ width:8px; height:8px; border-radius:50%; background:var(--down); }}
-    .badge.ok .dot {{ background:var(--ok); }}
-    .badge.ok {{ color:var(--ok); }}
-    .badge.down {{ color:var(--down); }}
-    .grid {{ display:grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap:1px; margin-top:28px; background:var(--line); box-shadow:0 0 0 1px rgba(0,0,0,.08); border-radius:8px; overflow:hidden; }}
-    .metric {{ background:var(--soft); padding:18px; min-width:0; }}
-    .label {{ color:var(--muted); font-size:12px; text-transform:uppercase; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}
-    .value {{ margin-top:12px; font-size:22px; line-height:1; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-    nav {{ display:flex; gap:14px; margin-top:22px; }}
-    a {{ color:var(--text); text-decoration:none; font-size:14px; font-weight:500; }}
-    a:hover {{ text-decoration:underline; }}
-    @media (max-width: 760px) {{ header {{ flex-direction:column; }} .grid {{ grid-template-columns:1fr 1fr; }} }}
+    html {{ min-height:100%; background:var(--bg); }}
+    body {{ margin:0; min-height:100vh; background:linear-gradient(180deg, #11100e 0%, #17140f 100%); color:var(--ink); font-family:"Courier New", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:0; }}
+    body::before {{ content:""; position:fixed; inset:0; pointer-events:none; opacity:.18; background-image:linear-gradient(rgba(247,241,223,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(247,241,223,.06) 1px, transparent 1px); background-size:28px 28px; }}
+    main {{ width:min(1120px, calc(100% - 32px)); margin:0 auto; padding:28px 0 36px; position:relative; }}
+    .shell {{ border:2px solid var(--line); background:rgba(24,22,17,.94); box-shadow:8px 8px 0 #050504; }}
+    header {{ display:grid; grid-template-columns:auto 1fr auto; gap:18px; align-items:center; padding:18px; border-bottom:2px solid var(--line); background:var(--panel-2); }}
+    .mark {{ width:68px; height:68px; display:grid; place-items:center; border:2px solid var(--ink); background:#0c0b09; box-shadow:4px 4px 0 var(--warn); font-size:22px; font-weight:700; line-height:1; }}
+    .brand {{ min-width:0; }}
+    h1 {{ margin:0; font-size:30px; line-height:1.05; font-weight:700; letter-spacing:0; text-transform:uppercase; }}
+    .subtitle {{ margin-top:6px; color:var(--muted); font-size:13px; line-height:1.35; word-break:break-word; }}
+    .status {{ justify-self:end; border:2px solid currentColor; padding:10px 12px; font-size:13px; font-weight:700; color:var(--warn); background:#0c0b09; min-width:132px; text-align:center; }}
+    .status.ok {{ color:var(--ok); }}
+    .grid {{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); border-bottom:2px solid var(--line); }}
+    .metric {{ min-width:0; padding:16px; border-right:2px solid var(--line); background:var(--panel); }}
+    .metric:last-child {{ border-right:0; }}
+    .label {{ color:var(--muted); font-size:11px; text-transform:uppercase; }}
+    .value {{ margin-top:10px; font-size:20px; line-height:1.05; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .content {{ display:grid; grid-template-columns:1.2fr .8fr; gap:0; }}
+    .panel {{ padding:18px; border-right:2px solid var(--line); min-width:0; }}
+    .panel:last-child {{ border-right:0; }}
+    .prompt {{ color:var(--ok); }}
+    .terminal {{ margin:0; padding:0; list-style:none; display:grid; gap:10px; font-size:13px; line-height:1.45; }}
+    .terminal li {{ display:grid; grid-template-columns:120px minmax(0,1fr); gap:12px; align-items:start; }}
+    .key {{ color:var(--muted); text-transform:uppercase; }}
+    code, a {{ color:var(--ink); word-break:break-all; }}
+    a {{ text-decoration-thickness:1px; text-underline-offset:3px; }}
+    .ok-text {{ color:var(--ok); }}
+    .warn-text {{ color:var(--warn); }}
+    .hash {{ color:var(--muted); }}
+    .footer {{ display:flex; flex-wrap:wrap; gap:10px; padding:14px 18px; border-top:2px solid var(--line); background:#0c0b09; }}
+    .button {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 12px; border:2px solid var(--line); background:var(--panel); color:var(--ink); text-decoration:none; font-size:13px; }}
+    .button:hover {{ border-color:var(--ink); }}
+    @media (max-width: 860px) {{ header {{ grid-template-columns:auto 1fr; }} .status {{ grid-column:1 / -1; justify-self:stretch; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:2px solid var(--line); }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:2px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} }}
   </style>
 </head>
 <body>
   <main>
-    <header>
-      <div>
-        <h1>UGraph services</h1>
-        <div class="store">{store}</div>
-      </div>
-      <div class="badge {badge}"><span class="dot"></span>{status}</div>
-    </header>
-    <section class="grid" aria-label="Service metrics">
-      <div class="metric"><div class="label">Block</div><div class="value">{to_block}</div></div>
-      <div class="metric"><div class="label">Entities</div><div class="value">{entities}</div></div>
-      <div class="metric"><div class="label">Sources</div><div class="value">{dynamic_sources}</div></div>
-      <div class="metric"><div class="label">History</div><div class="value">{history}</div></div>
-      <div class="metric"><div class="label">Range</div><div class="value">{history_range}</div></div>
-      <div class="metric"><div class="label">Errors</div><div class="value">{validation_errors}</div></div>
+    <section class="shell" aria-label="UGraph service status">
+      <header>
+        <div class="mark" aria-label="UGraph logo">UG</div>
+        <div class="brand">
+          <h1>UGraph</h1>
+          <div class="subtitle">open subgraph runtime / {store}</div>
+        </div>
+        <div class="status {badge}">{status}</div>
+      </header>
+      <section class="grid" aria-label="Service metrics">
+        <div class="metric"><div class="label">Block</div><div class="value">{to_block}</div></div>
+        <div class="metric"><div class="label">Entities</div><div class="value">{entities}</div></div>
+        <div class="metric"><div class="label">Sources</div><div class="value">{dynamic_sources}</div></div>
+        <div class="metric"><div class="label">History</div><div class="value">{history}</div></div>
+        <div class="metric"><div class="label">Range</div><div class="value">{history_range}</div></div>
+        <div class="metric"><div class="label">Errors</div><div class="value">{validation_errors}</div></div>
+      </section>
+      <section class="content">
+        <div class="panel">
+          <ul class="terminal" aria-label="Deployment terminal">
+            <li><span class="key">$ name</span><code>{deployment}</code></li>
+            <li><span class="key">$ version</span><code>{version}</code></li>
+            <li><span class="key">$ visibility</span><code>{visibility}</code></li>
+            <li><span class="key">$ endpoint</span><a href="{versioned_endpoint}">{versioned_endpoint}</a></li>
+            <li><span class="key">$ latest</span><a href="{latest_endpoint}">{latest_endpoint}</a></li>
+            <li><span class="key">$ block_hash</span><code class="hash">{block_hash}</code></li>
+          </ul>
+        </div>
+        <div class="panel">
+          <ul class="terminal" aria-label="Runtime terminal">
+            <li><span class="key">$ runtime</span><span class="{health_class}">{health_text}</span></li>
+            <li><span class="key">$ graph_node</span><span>compatible HTTP envelope</span></li>
+            <li><span class="key">$ goldsky</span><span>versioned path compatible</span></li>
+            <li><span class="key">$ refresh</span><span>10 seconds</span></li>
+          </ul>
+        </div>
+      </section>
+      <nav class="footer" aria-label="Service links">
+        <a class="button" href="/graphql">GraphiQL</a>
+        <a class="button" href="{latest_endpoint}">Latest endpoint</a>
+        <a class="button" href="/healthz">Health JSON</a>
+        <a class="button" href="/metrics">Metrics</a>
+      </nav>
     </section>
-    <nav>
-      <a href="/">GraphiQL</a>
-      <a href="/healthz">Health</a>
-      <a href="/metrics">Metrics</a>
-    </nav>
   </main>
 </body>
 </html>"#,
         store = html_escape(&store.label()),
         badge = badge,
         status = status,
+        deployment = html_escape(deployment),
+        version = html_escape(version),
+        visibility = html_escape(visibility),
+        versioned_endpoint = html_escape(&versioned_endpoint),
+        latest_endpoint = html_escape(&latest_endpoint),
         to_block = to_block,
+        block_hash = html_escape(block_hash),
         entities = entities,
         dynamic_sources = dynamic_sources,
         history = history,
         history_range = history_range,
-        validation_errors = validation_errors
+        validation_errors = validation_errors,
+        health_class = if ok { "ok-text" } else { "warn-text" },
+        health_text = if ok {
+            "sync complete"
+        } else {
+            "attention required"
+        }
     )
 }
 
@@ -578,8 +766,8 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&output).into_owned()
 }
 
-fn graphiql_html() -> &'static str {
-    r#"<!doctype html>
+fn graphiql_html(endpoint: &str) -> String {
+    const HTML: &str = r#"<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -651,20 +839,29 @@ fn graphiql_html() -> &'static str {
     <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/graphiql@2.4.7/graphiql.min.js"></script>
     <script>
-      const endpoint = '/graphql';
+      const endpoint = __UGRAPH_ENDPOINT_JSON__;
       const defaultQuery = '{\n  _meta { block { number hash } hasIndexingErrors }\n}';
 
-      function graphQLFetcher(graphQLParams) {
+      async function graphQLFetcher(graphQLParams) {
         const headers = { 'content-type': 'application/json' };
         const apiKey = window.localStorage && window.localStorage.getItem('ugraph_api_key');
         if (apiKey) {
           headers.authorization = 'Bearer ' + apiKey;
         }
-        return fetch(endpoint, {
+        const response = await fetch(endpoint, {
           method: 'post',
           headers,
           body: JSON.stringify(graphQLParams)
-        }).then((response) => response.json());
+        });
+        const body = await response.text();
+        if (!body) {
+          return { errors: [{ message: 'UGraph returned an empty response.' }] };
+        }
+        try {
+          return JSON.parse(body);
+        } catch (error) {
+          return { errors: [{ message: String(error && error.message ? error.message : error) }] };
+        }
       }
 
       function mountFallback(reason) {
@@ -701,15 +898,7 @@ fn graphiql_html() -> &'static str {
         if (!window.React || !window.ReactDOM || !window.GraphiQL) {
           mountFallback('GraphiQL assets did not load; using built-in fallback.');
         } else {
-          const fetcher = GraphiQL.createFetcher
-            ? GraphiQL.createFetcher({
-                url: endpoint,
-                headers: window.localStorage && window.localStorage.getItem('ugraph_api_key')
-                  ? { authorization: 'Bearer ' + window.localStorage.getItem('ugraph_api_key') }
-                  : undefined
-              })
-            : graphQLFetcher;
-          const element = React.createElement(GraphiQL, { fetcher, defaultQuery });
+          const element = React.createElement(GraphiQL, { fetcher: graphQLFetcher, defaultQuery });
           if (ReactDOM.createRoot) {
             ReactDOM.createRoot(document.getElementById('graphiql')).render(element);
           } else {
@@ -721,7 +910,11 @@ fn graphiql_html() -> &'static str {
       }
     </script>
   </body>
-</html>"#
+</html>"#;
+    HTML.replace(
+        "__UGRAPH_ENDPOINT_JSON__",
+        &serde_json::to_string(endpoint).unwrap_or_else(|_| "\"/graphql\"".to_string()),
+    )
 }
 
 #[cfg(test)]
@@ -777,13 +970,88 @@ mod tests {
 
     #[test]
     fn graphiql_html_uses_pinned_assets_and_fallback() {
-        let html = graphiql_html();
+        let html = graphiql_html("/subgraphs/growfi/latest/gn");
 
         assert!(html.contains("react@18.2.0"));
         assert!(html.contains("graphiql@2.4.7"));
         assert!(html.contains("GraphiQL assets did not load"));
         assert!(html.contains("graphQLFetcher"));
         assert!(html.contains("ugraph_api_key"));
+        assert!(html.contains(r#"const endpoint = "/subgraphs/growfi/latest/gn";"#));
+    }
+
+    #[test]
+    fn graphql_endpoint_accepts_graph_node_and_goldsky_paths() {
+        assert_eq!(
+            graphql_endpoint("/graphql"),
+            Some(GraphqlEndpoint {
+                path: "/graphql",
+                deployment: None,
+                version: None
+            })
+        );
+        assert_eq!(
+            graphql_endpoint("/subgraphs/growfi/4.0.2/gn"),
+            Some(GraphqlEndpoint {
+                path: "/subgraphs/growfi/4.0.2/gn",
+                deployment: Some("growfi"),
+                version: Some("4.0.2")
+            })
+        );
+        assert_eq!(
+            graphql_endpoint("/subgraphs/growfi/latest/graphql"),
+            Some(GraphqlEndpoint {
+                path: "/subgraphs/growfi/latest/graphql",
+                deployment: Some("growfi"),
+                version: Some("latest")
+            })
+        );
+        assert_eq!(graphql_endpoint("/subgraphs/growfi/4.0.2"), None);
+        assert_eq!(graphql_endpoint("/subgraph/growfi/4.0.2/gn"), None);
+    }
+
+    #[test]
+    fn home_html_renders_terminal_status_and_versioned_endpoint() {
+        let store = SnapshotStore::Postgres {
+            url: "postgres://example".to_string(),
+            deployment: "growfi".to_string(),
+        };
+        let snapshot = StoreSnapshot {
+            version: 1,
+            manifest: "subgraph.yaml".to_string(),
+            checkpoint: SyncCheckpoint {
+                from_block: Some(10),
+                to_block: 42,
+                block_hash: Some("0xabc".to_string()),
+                scanned_logs: 3,
+                executed_logs: 2,
+                validation_errors: 0,
+                complete: true,
+            },
+            schema: EntitySchema::default(),
+            entities: Vec::new(),
+            dynamic_sources: Vec::new(),
+            processed_logs: Vec::new(),
+            history: Vec::new(),
+        };
+        let metadata = storage::DeploymentMetadataRecord {
+            deployment: "growfi".to_string(),
+            version_label: Some("4.0.2".to_string()),
+            visibility: "public".to_string(),
+            owner_user_id: None,
+            owner_email: None,
+            created_by_key_id: None,
+            created_by_key_prefix: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+
+        let html = home_html(&store, Some(&snapshot), Some(&metadata));
+
+        assert!(html.contains("OPERATIONAL"));
+        assert!(html.contains("/subgraphs/growfi/4.0.2/gn"));
+        assert!(html.contains("/subgraphs/growfi/latest/gn"));
+        assert!(html.contains("versioned path compatible"));
     }
 
     #[test]

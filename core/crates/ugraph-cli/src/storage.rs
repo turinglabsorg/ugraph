@@ -417,6 +417,15 @@ pub fn list_deployment_metadata(url: &str) -> anyhow::Result<Vec<DeploymentMetad
         .collect())
 }
 
+pub fn deployment_metadata(
+    url: &str,
+    deployment: &str,
+) -> anyhow::Result<Option<DeploymentMetadataRecord>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    load_deployment_metadata(&mut client, deployment)
+}
+
 pub fn deployment_visibility(url: &str, deployment: &str) -> anyhow::Result<Option<String>> {
     let mut client = connect(url)?;
     migrate(&mut client)?;

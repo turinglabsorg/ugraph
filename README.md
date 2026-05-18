@@ -41,6 +41,12 @@ Local `deploy` loops bounded reader/sync passes so dynamic data sources created
 by mappings are subscribed, backfilled, and indexed before the command reports
 success.
 
+Deployment names are unique inside one Postgres-backed instance. The public API
+serves the current deployment through Graph Node/Goldsky-style paths:
+`/subgraphs/<deployment>/<version>/gn`,
+`/subgraphs/<deployment>/<version>/graphql`, and the `latest` alias. Explicit
+version paths are accepted only when they match registered deployment metadata.
+
 ## Core
 
 ```bash
