@@ -72,8 +72,8 @@
   keeps all retained snapshots. Postgres stores retained checkpoints and
   compact entity-version deltas in dedicated history tables.
 - `core scan/sync` chunks `eth_getLogs` with `UGRAPH_MAX_BLOCK_RANGE`, retries
-  transient RPC failures with `UGRAPH_RPC_RETRIES`, and splits range-limit
-  failures recursively.
+  transient RPC failures with `UGRAPH_RPC_RETRIES`, bounds individual requests
+  with `UGRAPH_RPC_TIMEOUT_SECS`, and splits range-limit failures recursively.
 - `core sync` checks the stored checkpoint block hash before resuming.
   `UGRAPH_REORG_POLICY=fail|rollback|reset` controls mismatch behavior.
   `rollback` probes retained checkpoints up to `UGRAPH_REORG_CHECK_DEPTH` and
@@ -99,10 +99,12 @@
   is provided, reads raw logs for one `chain_id`, and writes them into
   Postgres feed tables. `core sync --log-source postgres-feed` consumes that
   feed instead of calling `eth_getLogs` directly. Direct RPC sync remains
-  available with `--log-source rpc`.
-- `core deploy --provider local` registers feed subscriptions, runs a bounded
-  chain-reader pass when using `postgres-feed`, syncs the deployment, and
-  reports feed/sync status.
+  available with `--log-source rpc`. When no explicit RPC is configured,
+  `chain-reader` tries resolved Chainlist URLs in order.
+- `core deploy --provider local` registers feed subscriptions, runs bounded
+  chain-reader/sync passes when using `postgres-feed`, and only reports success
+  when dynamically created data source subscriptions have been backfilled and
+  the checkpoint is complete.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`
@@ -163,6 +165,14 @@
   `0x0ce83b9006ae4a7ce985505f6eee0e52b54d9ed07a0f0c4d76bee95bb1df3c25`,
   block `10866837`, 4 logs executed, 0 validation errors, local GraphQL matched
   Goldsky exactly for the new purchase.
+- Local dynamic-source deploy smoke over Sepolia block `10845895` completed in
+  2 passes using `https://sepolia.drpc.org`: pass 1 executed 2 static logs and
+  created 3 dynamic sources, pass 2 backfilled 10 total subscriptions and
+  closed the checkpoint with 0 validation errors. The publicnode Sepolia
+  endpoint timed out on some `eth_getLogs` calls during this smoke.
+- Chainlist fallback smoke with no explicit RPC also read Sepolia block
+  `10845895`, registered 7 subscriptions, and inserted 2 logs after skipping
+  bad public endpoints.
 - Redis is out of scope for now.
 - MongoDB is not the primary compatibility path. It can be explored behind a store adapter later, but only if it can prove equivalent behavior for GraphQL filters, ordering, relationships, historical block semantics, and atomic block commits.
 - SQLite can be used for local development and small tests, not as the production compatibility target.

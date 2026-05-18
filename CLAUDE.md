@@ -15,8 +15,9 @@
   infrastructure, ensure required chain readers exist, register subscriptions,
   run sync, and expose GraphQL/GraphiQL.
 - Implemented local flow: `ugraph deploy --provider local` can register feed
-  subscriptions, run a bounded `chain-reader` pass, and sync a deployment from
-  `UGRAPH_LOG_SOURCE=postgres-feed`.
+  subscriptions and loop bounded `chain-reader`/`sync` passes from
+  `UGRAPH_LOG_SOURCE=postgres-feed` until dynamic data source backfills are
+  complete.
 - Implemented feed schema tables: `ugraph_feed_subscriptions`,
   `ugraph_raw_blocks`, and `ugraph_raw_logs`.
 - Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also
@@ -24,5 +25,14 @@
   `--help`.
 - GraphiQL is served from pinned React/GraphiQL assets and includes a built-in
   fallback query UI if external assets fail.
+- RPC, Chainlist registry, and mapping `ethereum.call` requests are bounded by
+  `UGRAPH_RPC_TIMEOUT_SECS`.
+- When no explicit RPC is configured, `chain-reader` tries all resolved
+  Chainlist URLs in order rather than pinning itself to the first URL.
+- Chainlist fallback smoke with no explicit RPC passed on Sepolia block
+  `10845895`, registering 7 subscriptions and inserting 2 logs.
+- Sepolia local smoke should prefer `https://sepolia.drpc.org`; the publicnode
+  Sepolia endpoint timed out on some `eth_getLogs` calls during dynamic-source
+  deploy testing.
 - Keep provider wiring out of the core runtime. DigitalOcean is a likely target,
   but the core container should stay portable.

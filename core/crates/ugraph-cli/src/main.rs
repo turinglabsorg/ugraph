@@ -30,6 +30,7 @@ use crate::state::{
 use crate::storage::SnapshotStore;
 
 type LogIdentity = (String, bool, String, u64, u64, u64, String);
+const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Parser)]
 #[command(name = "ugraph")]
@@ -287,6 +288,8 @@ enum Command {
         limit: usize,
         #[arg(long)]
         reset: bool,
+        #[arg(long, env = "UGRAPH_DEPLOY_MAX_PASSES", default_value_t = 8)]
+        max_passes: usize,
         #[arg(long, env = "UGRAPH_MAX_BLOCK_RANGE", default_value_t = 2_000)]
         max_block_range: u64,
         #[arg(long, env = "UGRAPH_RPC_RETRIES", default_value_t = 3)]
@@ -571,7 +574,9 @@ struct DeployReport {
     provider: DeployProvider,
     deployment: String,
     log_source: LogSourceKind,
-    feed: Option<storage::FeedIngestReport>,
+    passes: usize,
+    feeds: Vec<storage::FeedIngestReport>,
+    syncs: Vec<MatrixSyncReport>,
     sync: MatrixSyncReport,
 }
 
@@ -1100,6 +1105,7 @@ fn main() -> anyhow::Result<()> {
             to_block,
             limit,
             reset,
+            max_passes,
             max_block_range,
             rpc_retries,
             json,
@@ -1111,60 +1117,68 @@ fn main() -> anyhow::Result<()> {
                 postgres_url.clone(),
                 deployment.clone(),
             )?;
-            let feed = if log_source == LogSourceKind::PostgresFeed {
-                let postgres_url = postgres_url
-                    .clone()
-                    .context("missing --postgres-url for postgres-feed deploy")?;
-                Some(run_chain_reader_once(ChainReaderInput {
-                    manifest: Some(manifest.clone()),
-                    postgres_url,
-                    deployment: deployment.clone(),
+            let _indexer_lock = store.acquire_indexer_lock()?;
+            let log_source_runtime = log_source_for_sync(log_source, &store)?;
+            let max_passes = max_passes.max(1);
+            let mut feeds = Vec::new();
+            let mut syncs = Vec::new();
+            let mut snapshot = None;
+            let mut sync_from_block = from_block;
+            let mut sync_reset = reset;
+            let mut passes = 0;
+            for pass in 0..max_passes {
+                passes = pass + 1;
+                if log_source == LogSourceKind::PostgresFeed {
+                    let postgres_url = postgres_url
+                        .clone()
+                        .context("missing --postgres-url for postgres-feed deploy")?;
+                    feeds.push(run_chain_reader_once(ChainReaderInput {
+                        manifest: Some(manifest.clone()),
+                        postgres_url,
+                        deployment: deployment.clone(),
+                        chain_id,
+                        rpc_url: rpc_url.clone(),
+                        from_block,
+                        to_block,
+                        max_block_range,
+                        rpc_retries,
+                    })?);
+                }
+                let current_snapshot = sync_once(SyncOnceInput {
+                    store: &store,
+                    manifest: &manifest,
+                    build_dir: &build_dir,
                     chain_id,
                     rpc_url: rpc_url.clone(),
-                    from_block,
+                    log_source: log_source_runtime.clone(),
+                    from_block: sync_from_block,
                     to_block,
+                    limit,
+                    reset: sync_reset,
+                    reorg_policy: ReorgPolicy::Rollback,
+                    reorg_check_depth: 64,
+                    history_limit: 1_024,
                     max_block_range,
                     rpc_retries,
-                })?)
-            } else {
-                None
-            };
-            let _indexer_lock = store.acquire_indexer_lock()?;
-            let snapshot = sync_once(SyncOnceInput {
-                store: &store,
-                manifest: &manifest,
-                build_dir: &build_dir,
-                chain_id,
-                rpc_url,
-                log_source: log_source_for_sync(log_source, &store)?,
-                from_block,
-                to_block,
-                limit,
-                reset,
-                reorg_policy: ReorgPolicy::Rollback,
-                reorg_check_depth: 64,
-                history_limit: 1_024,
-                max_block_range,
-                rpc_retries,
-            })?;
+                })?;
+                let should_continue = deploy_should_continue(&current_snapshot, log_source);
+                syncs.push(sync_report_from_snapshot(&store, &current_snapshot, false));
+                snapshot = Some(current_snapshot);
+                if !should_continue {
+                    break;
+                }
+                sync_from_block = None;
+                sync_reset = false;
+            }
+            let snapshot = snapshot.context("deploy sync did not run")?;
             let report = DeployReport {
                 provider,
                 deployment,
                 log_source,
-                feed,
-                sync: MatrixSyncReport {
-                    ok: snapshot.checkpoint.validation_errors == 0,
-                    store: store.label(),
-                    from_block: snapshot.checkpoint.from_block,
-                    to_block: snapshot.checkpoint.to_block,
-                    block_hash: snapshot.checkpoint.block_hash.clone(),
-                    scanned_logs: snapshot.checkpoint.scanned_logs,
-                    executed_logs: snapshot.checkpoint.executed_logs,
-                    validation_errors: snapshot.checkpoint.validation_errors,
-                    complete: snapshot.checkpoint.complete,
-                    entities: snapshot.entities.len(),
-                    dynamic_sources: snapshot.dynamic_sources.len(),
-                },
+                passes,
+                feeds,
+                syncs,
+                sync: sync_report_from_snapshot(&store, &snapshot, true),
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1172,13 +1186,25 @@ fn main() -> anyhow::Result<()> {
                 println!("provider: {:?}", report.provider);
                 println!("deployment: {}", report.deployment);
                 println!("logSource: {:?}", report.log_source);
-                if let Some(feed) = &report.feed {
-                    println!("feedInsertedLogs: {}", feed.inserted_logs);
-                    println!("feedToBlock: {}", feed.to_block.unwrap_or_default());
-                }
+                println!("passes: {}", report.passes);
+                let feed_inserted_logs: u64 =
+                    report.feeds.iter().map(|feed| feed.inserted_logs).sum();
+                let sync_executed_logs: usize =
+                    report.syncs.iter().map(|sync| sync.executed_logs).sum();
+                println!("feedPasses: {}", report.feeds.len());
+                println!("feedInsertedLogs: {}", feed_inserted_logs);
+                println!(
+                    "feedToBlock: {}",
+                    report
+                        .feeds
+                        .last()
+                        .and_then(|feed| feed.to_block)
+                        .unwrap_or_default()
+                );
+                println!("syncPasses: {}", report.syncs.len());
                 println!("store: {}", report.sync.store);
                 println!("toBlock: {}", report.sync.to_block);
-                println!("executedLogs: {}", report.sync.executed_logs);
+                println!("executedLogs: {}", sync_executed_logs);
                 println!("entities: {}", report.sync.entities);
                 println!("complete: {}", report.sync.complete);
             }
@@ -1845,12 +1871,26 @@ fn run_chain_reader_once(input: ChainReaderInput) -> anyhow::Result<storage::Fee
         )?;
     }
 
-    let rpc_url = resolve_primary_rpc_url(input.chain_id, input.rpc_url)?;
+    let rpc_urls = resolve_rpc_url_candidates(input.chain_id, input.rpc_url.clone())?;
+    let mut last_error = None;
+    for rpc_url in rpc_urls {
+        match run_chain_reader_scan(&input, &rpc_url) {
+            Ok(report) => return Ok(report),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no RPC URLs resolved")))
+}
+
+fn run_chain_reader_scan(
+    input: &ChainReaderInput,
+    rpc_url: &str,
+) -> anyhow::Result<storage::FeedIngestReport> {
     let to_block = match input.to_block {
         Some(to_block) => to_block,
-        None => latest_block_number(&rpc_url)?,
+        None => latest_block_number(rpc_url)?,
     };
-    let to_block_hash = fetch_block_hash(&rpc_url, to_block)?;
+    let to_block_hash = fetch_block_hash(rpc_url, to_block)?;
     let subscriptions = storage::list_feed_subscriptions(&input.postgres_url, input.chain_id)?;
     let mut inserted_logs = 0_u64;
     for subscription in &subscriptions {
@@ -1863,7 +1903,7 @@ fn run_chain_reader_once(input: ChainReaderInput) -> anyhow::Result<storage::Fee
             continue;
         }
         let logs = scan_raw_logs(
-            &rpc_url,
+            rpc_url,
             &subscription.address,
             from_block,
             to_block,
@@ -1924,6 +1964,33 @@ fn run_doctor_report(
     })
 }
 
+fn sync_report_from_snapshot(
+    store: &SnapshotStore,
+    snapshot: &state::StoreSnapshot,
+    require_complete: bool,
+) -> MatrixSyncReport {
+    MatrixSyncReport {
+        ok: snapshot.checkpoint.validation_errors == 0
+            && (!require_complete || snapshot.checkpoint.complete),
+        store: store.label(),
+        from_block: snapshot.checkpoint.from_block,
+        to_block: snapshot.checkpoint.to_block,
+        block_hash: snapshot.checkpoint.block_hash.clone(),
+        scanned_logs: snapshot.checkpoint.scanned_logs,
+        executed_logs: snapshot.checkpoint.executed_logs,
+        validation_errors: snapshot.checkpoint.validation_errors,
+        complete: snapshot.checkpoint.complete,
+        entities: snapshot.entities.len(),
+        dynamic_sources: snapshot.dynamic_sources.len(),
+    }
+}
+
+fn deploy_should_continue(snapshot: &state::StoreSnapshot, log_source: LogSourceKind) -> bool {
+    log_source == LogSourceKind::PostgresFeed
+        && snapshot.checkpoint.validation_errors == 0
+        && !snapshot.checkpoint.complete
+}
+
 fn run_matrix(input: MatrixInput) -> anyhow::Result<MatrixReport> {
     let structural = run_doctor_report(&input.manifest, &input.build_dir)?;
     let mut notes = Vec::new();
@@ -1954,19 +2021,7 @@ fn run_matrix(input: MatrixInput) -> anyhow::Result<MatrixReport> {
                 max_block_range: input.max_block_range,
                 rpc_retries: input.rpc_retries,
             })?;
-            Some(MatrixSyncReport {
-                ok: snapshot.checkpoint.validation_errors == 0,
-                store: store.label(),
-                from_block: snapshot.checkpoint.from_block,
-                to_block: snapshot.checkpoint.to_block,
-                block_hash: snapshot.checkpoint.block_hash.clone(),
-                scanned_logs: snapshot.checkpoint.scanned_logs,
-                executed_logs: snapshot.checkpoint.executed_logs,
-                validation_errors: snapshot.checkpoint.validation_errors,
-                complete: snapshot.checkpoint.complete,
-                entities: snapshot.entities.len(),
-                dynamic_sources: snapshot.dynamic_sources.len(),
-            })
+            Some(sync_report_from_snapshot(&store, &snapshot, false))
         }
         None => {
             notes.push("sync skipped: provide --to-block to run a bounded sync slice".to_string());
@@ -2326,14 +2381,23 @@ fn block_hash_mismatch(
 }
 
 fn resolve_primary_rpc_url(chain_id: u64, rpc_url: Option<String>) -> anyhow::Result<String> {
+    resolve_rpc_url_candidates(chain_id, rpc_url)?
+        .into_iter()
+        .next()
+        .context("no RPC URLs resolved")
+}
+
+fn resolve_rpc_url_candidates(
+    chain_id: u64,
+    rpc_url: Option<String>,
+) -> anyhow::Result<Vec<String>> {
     let mut rpc_opts = RpcResolverOptions::for_chain(chain_id);
     rpc_opts.explicit_rpc_url = rpc_url;
     let resolved = resolve_rpc_urls(rpc_opts)?;
-    resolved
-        .urls
-        .first()
-        .cloned()
-        .context("no RPC URLs resolved")
+    if resolved.urls.is_empty() {
+        anyhow::bail!("no RPC URLs resolved");
+    }
+    Ok(resolved.urls)
 }
 
 fn watch_backoff_ms(base_ms: u64, max_ms: u64, failures: u32) -> u64 {
@@ -2341,6 +2405,15 @@ fn watch_backoff_ms(base_ms: u64, max_ms: u64, failures: u32) -> u64 {
     let max_ms = max_ms.max(base_ms);
     let shift = failures.saturating_sub(1).min(6);
     base_ms.saturating_mul(1_u64 << shift).min(max_ms)
+}
+
+fn rpc_timeout() -> Duration {
+    let seconds = std::env::var("UGRAPH_RPC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS)
+        .max(1);
+    Duration::from_secs(seconds)
 }
 
 fn snapshot_store(
@@ -2374,7 +2447,9 @@ fn log_source_for_sync(kind: LogSourceKind, store: &SnapshotStore) -> anyhow::Re
 }
 
 fn fetch_block_hash(rpc_url: &str, block_number: u64) -> anyhow::Result<Option<String>> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(rpc_timeout())
+        .build()?;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -2720,6 +2795,47 @@ mod tests {
         assert_eq!(rolled_back.entities.len(), 1);
         assert_eq!(rolled_back.history.len(), 1);
         assert_eq!(rolled_back.history[0].checkpoint.to_block, 90);
+    }
+
+    #[test]
+    fn deploy_continues_only_for_incomplete_postgres_feed_without_errors() {
+        assert!(deploy_should_continue(
+            &test_snapshot(false, 0),
+            LogSourceKind::PostgresFeed
+        ));
+        assert!(!deploy_should_continue(
+            &test_snapshot(true, 0),
+            LogSourceKind::PostgresFeed
+        ));
+        assert!(!deploy_should_continue(
+            &test_snapshot(false, 1),
+            LogSourceKind::PostgresFeed
+        ));
+        assert!(!deploy_should_continue(
+            &test_snapshot(false, 0),
+            LogSourceKind::Rpc
+        ));
+    }
+
+    fn test_snapshot(complete: bool, validation_errors: usize) -> StoreSnapshot {
+        StoreSnapshot {
+            version: 1,
+            manifest: "subgraph.yaml".to_string(),
+            checkpoint: SyncCheckpoint {
+                from_block: Some(1),
+                to_block: 2,
+                block_hash: None,
+                scanned_logs: 0,
+                executed_logs: 0,
+                validation_errors,
+                complete,
+            },
+            schema: EntitySchema::default(),
+            entities: Vec::new(),
+            dynamic_sources: Vec::new(),
+            processed_logs: Vec::new(),
+            history: Vec::new(),
+        }
     }
 
     fn test_log(block_number: u64, log_index: u64) -> MatchedLog {

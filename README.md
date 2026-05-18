@@ -37,6 +37,9 @@ GraphQL/GraphiQL.
 The current implementation supports the local version of that flow. The same
 Docker image can run as `serve`, `indexer`, or `chain-reader`; `docker compose`
 starts Postgres, the shared reader, the feed-backed indexer, and the API.
+Local `deploy` loops bounded reader/sync passes so dynamic data sources created
+by mappings are subscribed, backfilled, and indexed before the command reports
+success.
 
 ## Core
 

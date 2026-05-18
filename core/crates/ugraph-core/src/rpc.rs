@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DEFAULT_CHAINLIST_REGISTRY_URL: &str = "https://chainid.network/chains.json";
+const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +76,16 @@ pub fn resolve_rpc_urls(opts: RpcResolverOptions) -> Result<RpcResolution, RpcRe
         });
     }
 
-    let body = reqwest::blocking::get(&opts.registry_url)
+    let client = reqwest::blocking::Client::builder()
+        .timeout(rpc_timeout())
+        .build()
+        .map_err(|source| RpcResolverError::Fetch {
+            url: opts.registry_url.clone(),
+            source,
+        })?;
+    let body = client
+        .get(&opts.registry_url)
+        .send()
         .map_err(|source| RpcResolverError::Fetch {
             url: opts.registry_url.clone(),
             source,
@@ -101,6 +113,15 @@ pub fn resolve_rpc_urls(opts: RpcResolverOptions) -> Result<RpcResolution, RpcRe
         source: opts.registry_url,
         urls,
     })
+}
+
+fn rpc_timeout() -> Duration {
+    let seconds = std::env::var("UGRAPH_RPC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS)
+        .max(1);
+    Duration::from_secs(seconds)
 }
 
 pub fn rpc_urls_from_chainlist_json(

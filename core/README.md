@@ -69,6 +69,8 @@ UGRAPH_REORG_CHECK_DEPTH=64
 UGRAPH_HISTORY_LIMIT=1024
 UGRAPH_MAX_BLOCK_RANGE=2000
 UGRAPH_RPC_RETRIES=3
+UGRAPH_RPC_TIMEOUT_SECS=15
+UGRAPH_DEPLOY_MAX_PASSES=8
 UGRAPH_SYNC_LIMIT=1000
 UGRAPH_IPFS_GATEWAY=https://ipfs.io/ipfs/
 UGRAPH_IPFS_TIMEOUT_SECS=60
@@ -85,7 +87,8 @@ The image uses the same binary for the API and indexer:
   `/metrics`.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
 - `UGRAPH_MODE=chain-reader` reads one `chain_id` from RPC and writes raw logs
-  into Postgres for every registered subscription on that chain.
+  into Postgres for every registered subscription on that chain. If no explicit
+  RPC URL is configured, it tries resolved Chainlist URLs in order.
 - `UGRAPH_STORAGE=postgres` should be used for shared API/indexer deployments.
 - `UGRAPH_LOG_SOURCE=rpc|postgres-feed` controls whether `sync` reads logs
   directly from RPC or from the shared Postgres raw feed. The default remains
@@ -99,6 +102,7 @@ The image uses the same binary for the API and indexer:
   `0` keeps all retained snapshots.
 - `UGRAPH_MAX_BLOCK_RANGE` chunks `eth_getLogs` ranges for provider safety.
 - `UGRAPH_RPC_RETRIES` retries transient RPC and HTTP failures.
+- `UGRAPH_RPC_TIMEOUT_SECS` bounds individual RPC and registry HTTP requests.
 - `UGRAPH_IPFS_GATEWAY` configures the gateway used by `ipfs.cat`,
   `ipfs.getBlock`, and `ipfs.map`; it can be a prefix or contain a `{path}`
   placeholder.
@@ -119,10 +123,11 @@ under their own `UGRAPH_DEPLOYMENT` ids. A deployment can subscribe to multiple
 multi-subgraph deployments cheap without turning the runtime into one heavy
 multi-subgraph process.
 
-`ugraph deploy --provider local` currently registers static subscriptions,
-runs a bounded chain-reader pass when `--log-source postgres-feed` is selected,
-syncs the deployment, and leaves the API available through the normal `serve`
-command.
+`ugraph deploy --provider local` currently registers static subscriptions and,
+when `--log-source postgres-feed` is selected, runs bounded `chain-reader` and
+`sync` passes until dynamically created data sources have been backfilled or
+`UGRAPH_DEPLOY_MAX_PASSES` is reached. It fails if the checkpoint remains
+incomplete, and leaves the API available through the normal `serve` command.
 
 ## Current Scope
 

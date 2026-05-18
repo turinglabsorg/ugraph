@@ -67,6 +67,7 @@ const BIG_DECIMAL_DIVISION_SCALE: u32 = 34;
 const MAX_DECIMAL_SCALE: usize = 10_000;
 const DEFAULT_IPFS_GATEWAY: &str = "https://ipfs.io/ipfs/";
 const DEFAULT_IPFS_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_MAX_IPFS_FILE_BYTES: u64 = 25 * 1024 * 1024;
 
 static POW10_CACHE: OnceLock<Mutex<BTreeMap<usize, BigInt>>> = OnceLock::new();
@@ -1862,6 +1863,7 @@ fn eth_call(rpc_url: &str, to: &str, data: &str, block: &str) -> Result<String, 
     let response = HTTP_CLIENT
         .get_or_init(reqwest::blocking::Client::new)
         .post(rpc_url)
+        .timeout(rpc_timeout())
         .json(&body)
         .send()
         .map_err(|err| err.to_string())?
@@ -1887,8 +1889,10 @@ fn eth_get_code(rpc_url: &str, address: &str, block_number: Option<u64>) -> Resu
         "method": "eth_getCode",
         "params": [address, block],
     });
-    let response = reqwest::blocking::Client::new()
+    let response = HTTP_CLIENT
+        .get_or_init(reqwest::blocking::Client::new)
         .post(rpc_url)
+        .timeout(rpc_timeout())
         .json(&body)
         .send()
         .map_err(|err| err.to_string())?
@@ -1966,6 +1970,15 @@ fn ipfs_timeout() -> Duration {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_IPFS_TIMEOUT_SECS);
+    Duration::from_secs(seconds)
+}
+
+fn rpc_timeout() -> Duration {
+    let seconds = std::env::var("UGRAPH_RPC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS)
+        .max(1);
     Duration::from_secs(seconds)
 }
 

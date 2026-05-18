@@ -9,6 +9,8 @@ use crate::{
     build_indexing_plan, decode_event_params, DecodeError, DecodedEventParam, PlanError, SourcePlan,
 };
 
+const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;
+
 #[derive(Debug, Error)]
 pub enum ScanError {
     #[error(transparent)]
@@ -430,9 +432,18 @@ fn rpc_once<T: for<'de> Deserialize<'de>>(
 
 fn rpc_client() -> Result<Client, ScanError> {
     Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(rpc_timeout())
         .build()
         .map_err(ScanError::Http)
+}
+
+fn rpc_timeout() -> Duration {
+    let seconds = std::env::var("UGRAPH_RPC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS)
+        .max(1);
+    Duration::from_secs(seconds)
 }
 
 fn retryable_rpc_error(error: &ScanError) -> bool {

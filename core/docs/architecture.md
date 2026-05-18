@@ -82,9 +82,10 @@ Implemented feed tables:
   index, and log index.
 
 `ugraph chain-reader` reads all active subscriptions for one `chain_id` and
-writes raw logs into those tables. `ugraph sync --log-source postgres-feed`
-loads matching logs from Postgres instead of calling `eth_getLogs`. The direct
-RPC path remains available through `--log-source rpc`.
+writes raw logs into those tables. When no explicit RPC URL is configured, it
+tries resolved Chainlist URLs in order. `ugraph sync --log-source
+postgres-feed` loads matching logs from Postgres instead of calling
+`eth_getLogs`. The direct RPC path remains available through `--log-source rpc`.
 
 Target CLI flow:
 
@@ -103,6 +104,8 @@ The deploy command should:
 - Create or reuse the shared Postgres database.
 - Ensure a `chain-reader` exists for every requested `chain_id`.
 - Register the subgraph deployment and its static subscriptions.
+- Loop bounded chain-reader/sync passes until dynamic data source subscriptions
+  created by mappings are backfilled and the checkpoint is complete.
 - Build/publish the container image when needed.
 - Start or schedule sync workers for that deployment.
 - Expose the GraphQL/GraphiQL API for that deployment.
@@ -158,7 +161,7 @@ used on a local Docker host, DigitalOcean App Platform, or any container
 runtime. `docker-compose.yml` is the local production-shaped smoke with
 Postgres, indexer, and API.
 
-For the shared-feed model, the same image should grow a third mode:
+For the shared-feed model, the same image supports
 `UGRAPH_MODE=chain-reader`. That process owns RPC polling for one `chain_id`
 and writes raw blocks/logs to Postgres. Run one reader per `chain_id`.
 `UGRAPH_MODE=indexer` then consumes local raw logs instead of calling RPC
@@ -178,10 +181,12 @@ status page for operators and smoke checks.
 ## RPC Robustness
 
 Log scanning chunks `eth_getLogs` requests with `UGRAPH_MAX_BLOCK_RANGE`.
-Transient HTTP/RPC failures are retried with `UGRAPH_RPC_RETRIES`; provider
-range-limit failures are split recursively into smaller ranges. Initial static
-source scanning tries resolved RPC URLs in order, so a bad public endpoint can
-fall through to the next Chainlist URL or explicit configured URL.
+Individual RPC, Chainlist registry, and mapping `ethereum.call` requests are
+bounded by `UGRAPH_RPC_TIMEOUT_SECS`. Transient HTTP/RPC failures are retried
+with `UGRAPH_RPC_RETRIES`; provider range-limit failures are split recursively
+into smaller ranges. Initial static source scanning tries resolved RPC URLs in
+order, so a bad public endpoint can fall through to the next Chainlist URL or
+explicit configured URL.
 
 ## Live Smoke
 

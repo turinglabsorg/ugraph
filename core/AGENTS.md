@@ -108,10 +108,12 @@ docker compose up --build
   consumes the feed, while `sync --log-source rpc` keeps the direct RPC path.
 - `chain-reader` owns RPC polling for one `chain_id` and writes raw logs for
   all registered subscriptions on that chain. Passing a manifest registers its
-  static data source subscriptions.
-- `deploy --provider local` registers feed subscriptions, runs a bounded
-  chain-reader pass for `postgres-feed`, syncs the deployment, and reports
-  feed/sync status.
+  static data source subscriptions. When no explicit RPC is configured,
+  `chain-reader` tries resolved Chainlist URLs in order.
+- `deploy --provider local` registers feed subscriptions, runs bounded
+  chain-reader/sync passes for `postgres-feed`, and only succeeds once dynamic
+  data source subscriptions created by mappings are backfilled and the
+  checkpoint is complete.
 - `serve` reloads the selected store on each GraphQL/health request so API
   containers see Postgres writes from indexer containers without restart.
 - `serve` exposes `/graphql` plus GraphiQL.
@@ -143,6 +145,14 @@ docker compose up --build
   the previous snapshot executed 4 logs with 0 validation errors in 8 seconds
   wall clock including rebuild, local `/graphql` returned the purchase, and
   `ugraph compare` matched Goldsky exactly.
+- Local dynamic-source deploy smoke over Sepolia block `10845895` completed in
+  2 passes using `https://sepolia.drpc.org`: pass 1 executed 2 static logs and
+  created 3 dynamic sources, pass 2 backfilled 10 total subscriptions and
+  closed the checkpoint with 0 validation errors. The publicnode Sepolia
+  endpoint timed out on some `eth_getLogs` calls during this smoke.
+- Chainlist fallback smoke with no explicit RPC also read Sepolia block
+  `10845895`, registered 7 subscriptions, and inserted 2 logs after skipping
+  bad public endpoints.
 - Uniswap v3 mainnet stress fixture: official `Uniswap/v3-subgraph` builds with
   `graph-cli`, `ugraph doctor` and `compat` pass for 1 static data source, 1
   template, 2 WASM modules, 6 handlers, and 20 imported host exports with no
@@ -221,6 +231,7 @@ The single Docker image is mode-driven:
 - `UGRAPH_HISTORY_LIMIT` bounds retained current-state historical snapshots;
   `0` keeps all retained snapshots.
 - `UGRAPH_MAX_BLOCK_RANGE` and `UGRAPH_RPC_RETRIES` harden RPC log scanning.
+- `UGRAPH_RPC_TIMEOUT_SECS` bounds individual RPC and registry HTTP requests.
 - The API exposes `/status` for an HTML operator view, `/healthz` for
   readiness, and `/metrics` for Prometheus.
 
