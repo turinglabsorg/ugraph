@@ -51,5 +51,9 @@ cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml
 
 ## Infra
 
-`infra/` will own Docker, Cloud Run, managed Postgres wiring, secrets, and the
-GraphQL/GraphiQL service surface.
+`infra/` owns online deployment wiring. The lowest-cost target is currently
+`infra/gcp/e2-micro`: one Google Compute Engine `e2-micro` VM, local Docker
+Compose, local Postgres, and direct image upload without Cloud SQL, Cloud Run,
+or Artifact Registry. The public edge is Caddy HTTPS on either a custom domain
+such as `ugraph.growfi.dev` or the generated `<external-ip>.sslip.io` hostname;
+the API and Postgres stay internal to the Docker network.

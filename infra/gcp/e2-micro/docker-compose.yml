@@ -1,0 +1,137 @@
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      UGRAPH_DOMAIN: ${UGRAPH_DOMAIN:?UGRAPH_DOMAIN is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    mem_limit: 64m
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    shm_size: 64mb
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=30
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - effective_cache_size=256MB
+    environment:
+      POSTGRES_DB: ${UGRAPH_POSTGRES_DB:-ugraph}
+      POSTGRES_USER: ${UGRAPH_POSTGRES_USER:-ugraph}
+      POSTGRES_PASSWORD: ${UGRAPH_POSTGRES_PASSWORD:-ugraph}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${UGRAPH_POSTGRES_USER:-ugraph} -d ${UGRAPH_POSTGRES_DB:-ugraph}
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 192m
+
+  api:
+    image: ${UGRAPH_IMAGE:?UGRAPH_IMAGE is required}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      UGRAPH_MODE: serve
+      UGRAPH_STORAGE: postgres
+      UGRAPH_POSTGRES_URL: postgres://${UGRAPH_POSTGRES_USER:-ugraph}:${UGRAPH_POSTGRES_PASSWORD:-ugraph}@postgres:5432/${UGRAPH_POSTGRES_DB:-ugraph}
+      UGRAPH_DEPLOYMENT: ${UGRAPH_DEPLOYMENT:-growfi}
+      UGRAPH_HOST: 0.0.0.0
+      UGRAPH_PORT: 8030
+      UGRAPH_IPFS_GATEWAY: ${UGRAPH_IPFS_GATEWAY:-https://ipfs.io/ipfs/}
+      UGRAPH_IPFS_TIMEOUT_SECS: ${UGRAPH_IPFS_TIMEOUT_SECS:-60}
+      UGRAPH_MAX_IPFS_FILE_BYTES: ${UGRAPH_MAX_IPFS_FILE_BYTES:-26214400}
+    expose:
+      - "8030"
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:8030/healthz
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 160m
+
+  indexer:
+    image: ${UGRAPH_IMAGE:?UGRAPH_IMAGE is required}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      UGRAPH_MODE: indexer
+      UGRAPH_STORAGE: postgres
+      UGRAPH_LOG_SOURCE: ${UGRAPH_LOG_SOURCE:-rpc}
+      UGRAPH_POSTGRES_URL: postgres://${UGRAPH_POSTGRES_USER:-ugraph}:${UGRAPH_POSTGRES_PASSWORD:-ugraph}@postgres:5432/${UGRAPH_POSTGRES_DB:-ugraph}
+      UGRAPH_DEPLOYMENT: ${UGRAPH_DEPLOYMENT:-growfi}
+      UGRAPH_MANIFEST: ${UGRAPH_MANIFEST:-/app/examples/growfi/subgraph.yaml}
+      UGRAPH_CHAIN_ID: ${UGRAPH_CHAIN_ID:-11155111}
+      UGRAPH_RPC_URL: ${UGRAPH_RPC_URL:-}
+      UGRAPH_FROM_BLOCK: ${UGRAPH_FROM_BLOCK:-10845295}
+      UGRAPH_TO_BLOCK: ${UGRAPH_TO_BLOCK:-}
+      UGRAPH_POLL_INTERVAL_MS: ${UGRAPH_POLL_INTERVAL_MS:-1000}
+      UGRAPH_RETRY_MAX_MS: ${UGRAPH_RETRY_MAX_MS:-60000}
+      UGRAPH_REORG_POLICY: ${UGRAPH_REORG_POLICY:-rollback}
+      UGRAPH_REORG_CHECK_DEPTH: ${UGRAPH_REORG_CHECK_DEPTH:-64}
+      UGRAPH_HISTORY_LIMIT: ${UGRAPH_HISTORY_LIMIT:-256}
+      UGRAPH_MAX_BLOCK_RANGE: ${UGRAPH_MAX_BLOCK_RANGE:-500}
+      UGRAPH_RPC_RETRIES: ${UGRAPH_RPC_RETRIES:-3}
+      UGRAPH_RPC_TIMEOUT_SECS: ${UGRAPH_RPC_TIMEOUT_SECS:-15}
+      UGRAPH_SYNC_LIMIT: ${UGRAPH_SYNC_LIMIT:-500}
+      UGRAPH_IPFS_GATEWAY: ${UGRAPH_IPFS_GATEWAY:-https://ipfs.io/ipfs/}
+      UGRAPH_IPFS_TIMEOUT_SECS: ${UGRAPH_IPFS_TIMEOUT_SECS:-60}
+      UGRAPH_MAX_IPFS_FILE_BYTES: ${UGRAPH_MAX_IPFS_FILE_BYTES:-26214400}
+    mem_limit: 320m
+
+  chain-reader:
+    image: ${UGRAPH_IMAGE:?UGRAPH_IMAGE is required}
+    restart: unless-stopped
+    profiles:
+      - feed
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      UGRAPH_MODE: chain-reader
+      UGRAPH_POSTGRES_URL: postgres://${UGRAPH_POSTGRES_USER:-ugraph}:${UGRAPH_POSTGRES_PASSWORD:-ugraph}@postgres:5432/${UGRAPH_POSTGRES_DB:-ugraph}
+      UGRAPH_DEPLOYMENT: ${UGRAPH_DEPLOYMENT:-growfi}
+      UGRAPH_MANIFEST: ${UGRAPH_MANIFEST:-/app/examples/growfi/subgraph.yaml}
+      UGRAPH_CHAIN_ID: ${UGRAPH_CHAIN_ID:-11155111}
+      UGRAPH_RPC_URL: ${UGRAPH_RPC_URL:-}
+      UGRAPH_FROM_BLOCK: ${UGRAPH_FROM_BLOCK:-10845295}
+      UGRAPH_TO_BLOCK: ${UGRAPH_TO_BLOCK:-}
+      UGRAPH_POLL_INTERVAL_MS: ${UGRAPH_POLL_INTERVAL_MS:-1000}
+      UGRAPH_RETRY_MAX_MS: ${UGRAPH_RETRY_MAX_MS:-60000}
+      UGRAPH_MAX_BLOCK_RANGE: ${UGRAPH_MAX_BLOCK_RANGE:-500}
+      UGRAPH_RPC_RETRIES: ${UGRAPH_RPC_RETRIES:-3}
+      UGRAPH_RPC_TIMEOUT_SECS: ${UGRAPH_RPC_TIMEOUT_SECS:-15}
+    mem_limit: 192m
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:

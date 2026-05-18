@@ -54,3 +54,22 @@ The same image shape can be promoted to managed container hosts once provider
 automation is implemented.
 
 The builder image uses Rust 1.88+ because Wasmtime 38 requires it.
+
+## Lowest-Cost GCP Target
+
+`gcp/e2-micro/` deploys the core image to one Google Compute Engine `e2-micro`
+VM in an Always Free eligible US region. It avoids Cloud SQL, Cloud Run, and
+Artifact Registry by uploading the locally built `linux/amd64` Docker image
+archive directly to the VM and running local Docker Compose.
+
+The default e2-micro profile is compact: Postgres, direct-RPC indexer, and API.
+The shared feed profile remains available with `COMPOSE_PROFILES=feed` plus
+`UGRAPH_LOG_SOURCE=postgres-feed`, but it is intentionally not the default on a
+1 GiB VM.
+
+The e2-micro target uses Caddy for HTTPS on `ugraph.growfi.dev` when
+`DO_DNS_ZONE=growfi.dev` is provided, or an `sslip.io` hostname when no custom
+domain is configured. It opens only ports `80` and `443`, keeps Postgres
+internal, stores the generated Postgres password in `/opt/ugraph/.env` with
+`0600` permissions, and enables a 2 GiB swapfile plus unattended security
+updates during VM bootstrap.

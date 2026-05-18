@@ -192,7 +192,19 @@
 ## Deployment Direction
 
 - Build container-first. A single Docker image should run locally and deploy cleanly to any container host.
-- DigitalOcean with managed Postgres is a likely target; do not bake in Cloud Run assumptions.
+- Lowest-cost deployment target is Google Compute Engine `e2-micro` under
+  `infra/gcp/e2-micro`: one Always Free eligible VM, local Docker Compose,
+  local Postgres, direct image upload, and no Cloud SQL, Cloud Run, or Artifact
+  Registry dependency. The secure default is Caddy HTTPS on a custom domain or
+  `<external-ip>.sslip.io`; use `UGRAPH_DOMAIN=ugraph.growfi.dev` and
+  `DO_DNS_ZONE=growfi.dev` to upsert the DigitalOcean DNS record. The VM must
+  run in the dedicated `ugraph-net` VPC, not the GCP `default` network.
+  Firewall only exposes `80/443` publicly; SSH is restricted to the deploy
+  operator IP. No public Postgres port, no public direct API port, generated DB
+  password in `/opt/ugraph/.env` with `0600`, unattended security updates, and
+  a 2 GiB swapfile for e2-micro stability.
+- Keep DigitalOcean compatible, but do not default to App Platform or managed
+  databases when the goal is strict cost containment.
 - Keep `core` runnable without cloud services for local compatibility tests.
 - Production should use a shared multi-chain feed: one `chain-reader` per
   `chain_id` reads RPC once and stores raw blocks/logs in Postgres;
