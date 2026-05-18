@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "crates/ugraph-core",
-  "crates/ugraph-runtime",
-  "crates/ugraph-cli"
+  "core/crates/ugraph-core",
+  "core/crates/ugraph-runtime",
+  "cli"
 ]
 resolver = "2"
 

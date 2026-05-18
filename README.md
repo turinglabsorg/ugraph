@@ -2,7 +2,9 @@
 
 `ugraph` is split into two layers:
 
-- `core/`: Rust Graph Node/Goldsky-compatible subgraph runtime and CLI.
+- `core/`: Rust Graph Protocol-compatible libraries, fixtures, docs, and
+  Docker runtime assets.
+- `cli/`: the `ugraph` operator binary.
 - `infra/`: container and serverless deployment layer for running `core` online.
 
 The storage target is Postgres. SQLite can be used for local development and
@@ -47,12 +49,12 @@ serves the current deployment through Graph Node/Goldsky-style paths:
 `/subgraphs/<deployment>/<version>/graphql`, and the `latest` alias. Explicit
 version paths are accepted only when they match registered deployment metadata.
 
-## Core
+## Local Development
 
 ```bash
-cd core
 cargo test
-cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml
+cargo run -p ugraph -- doctor --manifest core/examples/growfi/subgraph.yaml
+docker build -f core/Dockerfile -t ugraph-core:local .
 ```
 
 ## Infra

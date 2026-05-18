@@ -2637,13 +2637,22 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         run.dynamic_sources.clone(),
         processed_logs,
     );
+    let current_history =
+        historical_snapshot_from_store(checkpoint, &run.entity_store, run.dynamic_sources);
+    let mut activity_history = run.history.clone();
+    activity_history.push(current_history.clone());
     snapshot.history = merge_history(
         previous.as_ref(),
         run.history,
-        historical_snapshot_from_store(checkpoint, &run.entity_store, run.dynamic_sources),
+        current_history,
         input.history_limit,
     );
-    input.store.write(&snapshot)?;
+    input.store.write_with_activity(
+        &snapshot,
+        &activity_history,
+        previous.as_ref(),
+        input.reset,
+    )?;
     Ok(snapshot)
 }
 

@@ -581,11 +581,12 @@ fn sync_activity_for_store(
             deployment,
             options.page,
             options.limit,
-            10,
+            25,
             options.show_empty,
         ),
         SnapshotStore::Json { .. } => Ok(storage::SyncActivityPage {
             activities: Vec::new(),
+            stats: storage::SyncActivityStats::default(),
             page: options.page,
             limit: options.limit,
             has_previous: options.page > 1,
@@ -694,7 +695,16 @@ fn home_html(
     let dynamic_sources = status
         .map(|status| status.dynamic_sources.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let history = status
+    let entity_changes = sync_activity
+        .map(|page| page.stats.entity_changes.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let change_blocks = sync_activity
+        .map(|page| page.stats.change_blocks.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let indexed_checkpoints = sync_activity
+        .map(|page| page.stats.indexed_checkpoints.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let state_cache = status
         .map(|status| status.history_snapshots.to_string())
         .unwrap_or_else(|| "-".to_string());
     let validation_errors = status
@@ -717,9 +727,9 @@ fn home_html(
     let sync_page_label = format!(
         "page {sync_page} / {}",
         if sync_mode {
-            "all blocks"
+            "sync checkpoints"
         } else {
-            "changed blocks"
+            "entity changes"
         }
     );
     format!(
@@ -781,6 +791,10 @@ fn home_html(
     .subgraph-cell:last-child {{ border-right:0; }}
     .subgraph-name {{ color:var(--acid); font-size:18px; font-weight:700; }}
     .subgraph-label {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; }}
+    .sync-summary {{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); border-top:3px solid var(--line); }}
+    .sync-summary span {{ min-width:0; padding:9px 10px; border-right:3px solid var(--line); font-size:12px; font-weight:700; text-transform:uppercase; }}
+    .sync-summary span:last-child {{ border-right:0; }}
+    .sync-summary b {{ color:var(--acid); }}
     .sync-row {{ display:grid; grid-template-columns:170px minmax(0, 1fr); border-top:3px solid var(--line); }}
     .sync-block {{ padding:12px; border-right:3px solid var(--line); background:#101010; color:var(--acid); font-size:20px; font-weight:700; }}
     .sync-block a {{ color:var(--acid); }}
@@ -804,7 +818,7 @@ fn home_html(
     .footer {{ display:flex; flex-wrap:wrap; align-items:center; gap:0; border-top:3px solid var(--line); background:var(--void); }}
     .button {{ display:inline-flex; align-items:center; justify-content:center; min-height:46px; padding:10px 14px; border-right:3px solid var(--line); background:var(--void); color:var(--ink); text-decoration:none; font-size:13px; font-weight:700; text-transform:uppercase; }}
     .button:hover {{ background:var(--paper); color:var(--void); }}
-    @media (max-width: 900px) {{ body::after {{ display:none; }} .shell {{ box-shadow:7px 7px 0 var(--acid); }} .topbar {{ flex-direction:column; }} header {{ grid-template-columns:86px 1fr; }} .mark {{ min-height:96px; font-size:25px; }} .brand {{ padding:13px; }} h1 {{ font-size:42px; }} .status {{ grid-column:1 / -1; border-left:0; border-top:3px solid var(--line); min-height:54px; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:3px solid var(--line); }} .metric:nth-child(2n) {{ border-right:0; }} .metric:first-child .value, .value {{ font-size:24px; }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:3px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} .section-head {{ display:grid; grid-template-columns:1fr; }} .sync-controls {{ margin-left:0; border-left:0; border-top:3px solid var(--void); }} .control {{ flex:1 1 auto; justify-content:center; }} .subgraph-row {{ grid-template-columns:1fr; }} .subgraph-cell {{ border-right:0; border-bottom:3px solid var(--line); }} .subgraph-cell:last-child {{ border-bottom:0; }} .sync-row {{ grid-template-columns:1fr; }} .sync-block {{ border-right:0; border-bottom:3px solid var(--line); }} .footer {{ display:grid; grid-template-columns:1fr; }} .button {{ margin-left:0; border-right:0; border-left:0; border-bottom:3px solid var(--line); width:100%; justify-content:flex-start; }} }}
+    @media (max-width: 900px) {{ body::after {{ display:none; }} .shell {{ box-shadow:7px 7px 0 var(--acid); }} .topbar {{ flex-direction:column; }} header {{ grid-template-columns:86px 1fr; }} .mark {{ min-height:96px; font-size:25px; }} .brand {{ padding:13px; }} h1 {{ font-size:42px; }} .status {{ grid-column:1 / -1; border-left:0; border-top:3px solid var(--line); min-height:54px; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:3px solid var(--line); }} .metric:nth-child(2n) {{ border-right:0; }} .metric:first-child .value, .value {{ font-size:24px; }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:3px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} .section-head {{ display:grid; grid-template-columns:1fr; }} .sync-controls {{ margin-left:0; border-left:0; border-top:3px solid var(--void); }} .control {{ flex:1 1 auto; justify-content:center; }} .subgraph-row {{ grid-template-columns:1fr; }} .subgraph-cell {{ border-right:0; border-bottom:3px solid var(--line); }} .subgraph-cell:last-child {{ border-bottom:0; }} .sync-summary {{ grid-template-columns:1fr 1fr; }} .sync-summary span:nth-child(2n) {{ border-right:0; }} .sync-summary span {{ border-bottom:3px solid var(--line); }} .sync-row {{ grid-template-columns:1fr; }} .sync-block {{ border-right:0; border-bottom:3px solid var(--line); }} .footer {{ display:grid; grid-template-columns:1fr; }} .button {{ margin-left:0; border-right:0; border-left:0; border-bottom:3px solid var(--line); width:100%; justify-content:flex-start; }} }}
   </style>
 </head>
 <body>
@@ -826,7 +840,7 @@ fn home_html(
         <div class="metric"><div class="label">Block</div><div class="value">{to_block}</div></div>
         <div class="metric"><div class="label">Entities</div><div class="value">{entities}</div></div>
         <div class="metric"><div class="label">Sources</div><div class="value">{dynamic_sources}</div></div>
-        <div class="metric"><div class="label">History</div><div class="value">{history}</div></div>
+        <div class="metric"><div class="label">Changes</div><div class="value">{entity_changes}</div></div>
         <div class="metric"><div class="label">Errors</div><div class="value">{validation_errors}</div></div>
       </section>
       <section class="content">
@@ -845,6 +859,9 @@ fn home_html(
             <li><span class="key">$ runtime</span><span class="{health_class}">{health_text}</span></li>
             <li><span class="key">$ chain</span><code>{chain_id}</code></li>
             <li><span class="key">$ explorer</span>{explorer}</li>
+            <li><span class="key">$ change_blocks</span><span>{change_blocks}</span></li>
+            <li><span class="key">$ checkpoints</span><span>{indexed_checkpoints}</span></li>
+            <li><span class="key">$ state_cache</span><span>{state_cache}</span></li>
             <li><span class="key">$ sync_page</span><span>{sync_page_label}</span></li>
             <li><span class="key">$ refresh</span><span>10 seconds</span></li>
           </ul>
@@ -854,8 +871,9 @@ fn home_html(
         <div class="section-head"><div class="section-title">PUBLIC SUBGRAPHS</div></div>
         {public_subgraphs}
       </section>
-      <section class="section" aria-label="Recent sync blocks">
-        <div class="section-head"><div class="section-title">SYNC BLOCKS</div>{sync_controls}</div>
+      <section class="section" aria-label="Entity changes">
+        <div class="section-head"><div class="section-title">ENTITY CHANGES</div>{sync_controls}</div>
+        {sync_summary}
         {sync_blocks}
       </section>
       <nav class="footer" aria-label="Service links">
@@ -888,13 +906,17 @@ fn home_html(
         block_hash = html_escape(block_hash),
         entities = entities,
         dynamic_sources = dynamic_sources,
-        history = history,
+        entity_changes = entity_changes,
         validation_errors = validation_errors,
         public_subgraphs = public_subgraphs,
         sync_controls = sync_controls,
+        sync_summary = sync_summary_html(sync_activity),
         sync_blocks = sync_blocks,
         chain_id = html_escape(&chain_id),
         explorer = explorer,
+        change_blocks = html_escape(&change_blocks),
+        indexed_checkpoints = html_escape(&indexed_checkpoints),
+        state_cache = html_escape(&state_cache),
         sync_page_label = html_escape(&sync_page_label),
         health_class = if ok { "ok-text" } else { "warn-text" },
         health_text = if ok {
@@ -942,6 +964,28 @@ fn public_subgraphs_html(rows: &[storage::DeploymentMetadataRecord]) -> String {
         .join("")
 }
 
+fn sync_summary_html(page: Option<&storage::SyncActivityPage>) -> String {
+    let stats = page.map(|page| page.stats.clone()).unwrap_or_default();
+    format!(
+        concat!(
+            r#"<div class="sync-summary" aria-label="Entity change summary">"#,
+            r#"<span>change blocks <b>{change_blocks}</b></span>"#,
+            r#"<span>entity changes <b>{entity_changes}</b></span>"#,
+            r#"<span>created <b>{created}</b></span>"#,
+            r#"<span>updated <b>{updated}</b></span>"#,
+            r#"<span>removed <b>{removed}</b></span>"#,
+            r#"<span>checkpoints <b>{indexed_checkpoints}</b></span>"#,
+            r#"</div>"#
+        ),
+        change_blocks = stats.change_blocks,
+        entity_changes = stats.entity_changes,
+        created = stats.created,
+        updated = stats.updated,
+        removed = stats.removed,
+        indexed_checkpoints = stats.indexed_checkpoints
+    )
+}
+
 fn sync_controls_html(
     page: Option<&storage::SyncActivityPage>,
     requested: &SyncActivityOptions,
@@ -957,9 +1001,9 @@ fn sync_controls_html(
     let next = page.filter(|page| page.has_next).map(|_| page_number + 1);
     let mode_url = sync_activity_url(1, limit, !show_empty);
     let mode_label = if show_empty {
-        "hide empty"
+        "changes only"
     } else {
-        "show empty"
+        "show checkpoints"
     };
     let previous_html = previous
         .map(|page| {
@@ -1003,19 +1047,24 @@ fn sync_activity_url(page: usize, limit: usize, show_empty: bool) -> String {
 
 fn sync_blocks_html(page: Option<&storage::SyncActivityPage>, options: &ServeOptions) -> String {
     let Some(page) = page else {
-        return r#"<div class="empty-row">sync activity unavailable</div>"#.to_string();
+        return r#"<div class="empty-row">entity change activity unavailable</div>"#.to_string();
     };
     if page.activities.is_empty() {
-        return r#"<div class="empty-row">no retained sync activity</div>"#.to_string();
+        return if page.show_empty {
+            r#"<div class="empty-row">no sync checkpoints recorded</div>"#.to_string()
+        } else {
+            r#"<div class="empty-row">no entity changes recorded</div>"#.to_string()
+        };
     }
     page.activities
         .iter()
         .map(|activity| {
+            let total_changes = activity.created + activity.updated + activity.removed;
             let changes = if activity.changes.is_empty() {
                 r#"<span class="change"><b>idle</b><code>no entity changes</code></span>"#
                     .to_string()
             } else {
-                activity
+                let mut rows = activity
                     .changes
                     .iter()
                     .map(|change| {
@@ -1028,7 +1077,14 @@ fn sync_blocks_html(page: Option<&storage::SyncActivityPage>, options: &ServeOpt
                         )
                     })
                     .collect::<Vec<_>>()
-                    .join("")
+                    .join("");
+                if total_changes > activity.changes.len() {
+                    rows.push_str(&format!(
+                        r#"<span class="change"><b>more</b><code>{} hidden</code></span>"#,
+                        total_changes - activity.changes.len()
+                    ));
+                }
+                rows
             };
             let block = block_link_html(activity.block_number, options);
             let explorer = block_explorer_url(options, activity.block_number)
@@ -1537,6 +1593,14 @@ mod tests {
                     action: storage::EntityChangeAction::Updated,
                 }],
             }],
+            stats: storage::SyncActivityStats {
+                change_blocks: 1,
+                entity_changes: 3,
+                indexed_checkpoints: 7,
+                created: 1,
+                updated: 2,
+                removed: 0,
+            },
             page: 1,
             limit: 8,
             has_previous: false,
@@ -1567,15 +1631,18 @@ mod tests {
         assert!(html.contains("/subgraphs/growfi/4.0.2/gn"));
         assert!(html.contains("/subgraphs/growfi/latest/gn"));
         assert!(html.contains("PUBLIC SUBGRAPHS"));
-        assert!(html.contains("SYNC BLOCKS"));
+        assert!(html.contains("ENTITY CHANGES"));
         assert!(html.contains("ops@ugraph.local"));
         assert!(html.contains("updated"));
         assert!(html.contains("Token:0xabc"));
         assert!(html.contains("sepolia.etherscan.io/block/42"));
         assert!(html.contains("data-timestamp=\"1700000000\""));
-        assert!(html.contains("show empty"));
-        assert!(html.contains("page 1 / changed blocks"));
+        assert!(html.contains("show checkpoints"));
+        assert!(html.contains("page 1 / entity changes"));
+        assert!(html.contains("entity changes <b>3</b>"));
+        assert!(html.contains("$ state_cache"));
         assert!(html.contains("$ chain"));
+        assert!(!html.contains(">History<"));
         assert!(!html.contains("$ query"));
         assert!(!html.contains("$ api"));
         assert!(!html.contains("versioned endpoint active"));

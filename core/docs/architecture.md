@@ -2,18 +2,20 @@
 
 `ugraph` is a Rust runtime for standard Graph Protocol subgraphs. The project
 is intentionally agnostic: GrowFi is only the first fixture under
-`examples/growfi/`.
+`core/examples/growfi/`.
 
 ## Components
 
-- `ugraph-core`: standard subgraph manifest, GraphQL schema, ABI, and runtime types.
-- `ugraph-cli`: CLI entrypoint for validate, inspect, sync, serve, and deploy.
+- `core/crates/ugraph-core`: standard subgraph manifest, GraphQL schema, ABI, and runtime types.
+- `cli`: CLI entrypoint for validate, inspect, sync, serve, and deploy.
 - `ugraph-runtime`: executes graph-ts mapping WASM and implements Graph host exports.
 - Stores: JSON persistence for local sync passes and Postgres persistence for
   deployment-backed sync/serve loops. Both store schema, entities, dynamic
   source instances, checkpoint, retained historical snapshots, and partial-run
   processed-log cursors. Postgres stores retained historical checkpoints and
-  compact entity-version deltas in separate tables.
+  compact entity-version deltas in separate tables. The append-only
+  `ugraph_entity_changes` timeline is separate from retained history and records
+  when entities were created, updated, or removed.
 - `server`: GraphQL endpoint compatible with hosted subgraph query envelopes
   for current-state entity reads.
 - `rpc`: user-provided RPC first, then fresh Chainlist-compatible registry fallback.

@@ -125,11 +125,22 @@ pub enum EntityChangeAction {
 #[derive(Debug, Clone)]
 pub struct SyncActivityPage {
     pub activities: Vec<SyncBlockActivity>,
+    pub stats: SyncActivityStats,
     pub page: usize,
     pub limit: usize,
     pub has_previous: bool,
     pub has_next: bool,
     pub show_empty: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SyncActivityStats {
+    pub change_blocks: usize,
+    pub entity_changes: usize,
+    pub indexed_checkpoints: usize,
+    pub created: usize,
+    pub updated: usize,
+    pub removed: usize,
 }
 
 impl EntityChangeAction {
@@ -139,6 +150,15 @@ impl EntityChangeAction {
             Self::Updated => "updated",
             Self::Removed => "removed",
         }
+    }
+}
+
+fn row_to_entity_change_action(value: &str) -> anyhow::Result<EntityChangeAction> {
+    match value {
+        "created" => Ok(EntityChangeAction::Created),
+        "updated" => Ok(EntityChangeAction::Updated),
+        "removed" => Ok(EntityChangeAction::Removed),
+        other => anyhow::bail!("unknown entity change action `{other}`"),
     }
 }
 
@@ -230,13 +250,31 @@ impl SnapshotStore {
         }
     }
 
+    #[cfg(test)]
     pub fn write(&self, snapshot: &StoreSnapshot) -> anyhow::Result<()> {
+        self.write_with_activity(snapshot, &snapshot.history, None, true)
+    }
+
+    pub fn write_with_activity(
+        &self,
+        snapshot: &StoreSnapshot,
+        activity: &[HistoricalSnapshot],
+        activity_baseline: Option<&StoreSnapshot>,
+        replace_activity: bool,
+    ) -> anyhow::Result<()> {
         match self {
             Self::Json { path } => write_snapshot(path, snapshot),
             Self::Postgres { url, deployment } => {
                 let mut client = connect(url)?;
                 migrate(&mut client)?;
-                write_postgres_snapshot(&mut client, deployment, snapshot)
+                write_postgres_snapshot(
+                    &mut client,
+                    deployment,
+                    snapshot,
+                    activity,
+                    activity_baseline,
+                    replace_activity,
+                )
             }
         }
     }
@@ -534,28 +572,40 @@ pub fn recent_sync_activity(
     let offset = page.saturating_sub(1).saturating_mul(limit);
     let query_limit = i64::try_from(limit.saturating_add(1)).context("limit overflows postgres")?;
     let query_offset = i64::try_from(offset).context("offset overflows postgres")?;
-    let mut block_rows = client.query(
-        r#"
-        select
-          h.block_number,
-          h.block_hash,
-          nullif(h.checkpoint->>'block_timestamp', '')::bigint as block_timestamp
-        from ugraph_history_snapshots h
-        where h.deployment = $1
-          and (
-            $4::boolean
-            or exists (
-              select 1
-              from ugraph_entity_versions v
-              where v.deployment = h.deployment
-                and v.block_number = h.block_number
-            )
-          )
-        order by h.block_number desc
-        limit $2 offset $3
-        "#,
-        &[&deployment, &query_limit, &query_offset, &show_empty],
-    )?;
+    let stats = sync_activity_stats(&mut client, deployment)?;
+    let mut block_rows = if show_empty {
+        client.query(
+            r#"
+            select block_number, block_hash, block_timestamp
+            from ugraph_sync_checkpoints
+            where deployment = $1
+            order by block_number desc
+            limit $2 offset $3
+            "#,
+            &[&deployment, &query_limit, &query_offset],
+        )?
+    } else {
+        client.query(
+            r#"
+            select
+              changed.block_number,
+              coalesce(c.block_hash, changed.block_hash) as block_hash,
+              coalesce(c.block_timestamp, changed.block_timestamp) as block_timestamp
+            from (
+              select block_number, min(block_hash) as block_hash, min(block_timestamp) as block_timestamp
+              from ugraph_entity_changes
+              where deployment = $1
+              group by block_number
+            ) changed
+            left join ugraph_sync_checkpoints c
+              on c.deployment = $1
+             and c.block_number = changed.block_number
+            order by changed.block_number desc
+            limit $2 offset $3
+            "#,
+            &[&deployment, &query_limit, &query_offset],
+        )?
+    };
     let has_next = block_rows.len() > limit;
     if has_next {
         block_rows.truncate(limit);
@@ -596,6 +646,7 @@ pub fn recent_sync_activity(
     if postgres_blocks.is_empty() {
         return Ok(SyncActivityPage {
             activities: Vec::new(),
+            stats,
             page,
             limit,
             has_previous: page > 1,
@@ -609,19 +660,8 @@ pub fn recent_sync_activity(
           v.block_number,
           v.entity,
           v.id,
-          v.removed,
-          prev.removed as previous_removed
-        from ugraph_entity_versions v
-        left join lateral (
-          select removed
-          from ugraph_entity_versions p
-          where p.deployment = $1
-            and p.entity = v.entity
-            and p.id = v.id
-            and p.block_number < v.block_number
-          order by p.block_number desc
-          limit 1
-        ) prev on v.entity is not null
+          v.action
+        from ugraph_entity_changes v
         where v.deployment = $1
           and v.block_number = any($2)
         order by v.block_number desc, v.entity, v.id
@@ -636,15 +676,7 @@ pub fn recent_sync_activity(
         };
         let entity = row.get::<_, String>("entity");
         let id = row.get::<_, String>("id");
-        let removed = row.get::<_, bool>("removed");
-        let previous_removed = row.get::<_, Option<bool>>("previous_removed");
-        let action = if removed {
-            EntityChangeAction::Removed
-        } else if previous_removed == Some(false) {
-            EntityChangeAction::Updated
-        } else {
-            EntityChangeAction::Created
-        };
+        let action = row_to_entity_change_action(row.get::<_, String>("action").as_str())?;
         match action {
             EntityChangeAction::Created => activity.created += 1,
             EntityChangeAction::Updated => activity.updated += 1,
@@ -661,11 +693,40 @@ pub fn recent_sync_activity(
             .into_iter()
             .filter_map(|block| blocks.remove(&block))
             .collect(),
+        stats,
         page,
         limit,
         has_previous: page > 1,
         has_next,
         show_empty,
+    })
+}
+
+fn sync_activity_stats(client: &mut Client, deployment: &str) -> anyhow::Result<SyncActivityStats> {
+    let row = client.query_one(
+        r#"
+        select
+          count(distinct block_number)::bigint as change_blocks,
+          count(*)::bigint as entity_changes,
+          count(*) filter (where action = 'created')::bigint as created,
+          count(*) filter (where action = 'updated')::bigint as updated,
+          count(*) filter (where action = 'removed')::bigint as removed
+        from ugraph_entity_changes
+        where deployment = $1
+        "#,
+        &[&deployment],
+    )?;
+    let checkpoint_row = client.query_one(
+        "select count(*)::bigint from ugraph_sync_checkpoints where deployment = $1",
+        &[&deployment],
+    )?;
+    Ok(SyncActivityStats {
+        change_blocks: count_usize(&row, 0)?,
+        entity_changes: count_usize(&row, 1)?,
+        created: count_usize(&row, 2)?,
+        updated: count_usize(&row, 3)?,
+        removed: count_usize(&row, 4)?,
+        indexed_checkpoints: count_usize(&checkpoint_row, 0)?,
     })
 }
 
@@ -995,6 +1056,9 @@ fn write_postgres_snapshot(
     client: &mut Client,
     deployment: &str,
     snapshot: &StoreSnapshot,
+    activity: &[HistoricalSnapshot],
+    activity_baseline: Option<&StoreSnapshot>,
+    replace_activity: bool,
 ) -> anyhow::Result<()> {
     let mut tx = client.transaction()?;
     let checkpoint = serde_json::to_value(&snapshot.checkpoint)?;
@@ -1021,6 +1085,14 @@ fn write_postgres_snapshot(
             &schema,
             &history,
         ],
+    )?;
+
+    write_postgres_activity(
+        &mut tx,
+        deployment,
+        activity,
+        activity_baseline,
+        replace_activity,
     )?;
 
     tx.execute(
@@ -1215,6 +1287,173 @@ fn changed_entity_versions(
         }
     }
     rows
+}
+
+fn write_postgres_activity(
+    tx: &mut postgres::Transaction<'_>,
+    deployment: &str,
+    activity: &[HistoricalSnapshot],
+    activity_baseline: Option<&StoreSnapshot>,
+    replace_activity: bool,
+) -> anyhow::Result<()> {
+    if replace_activity {
+        tx.execute(
+            "delete from ugraph_entity_changes where deployment = $1",
+            &[&deployment],
+        )?;
+        tx.execute(
+            "delete from ugraph_sync_checkpoints where deployment = $1",
+            &[&deployment],
+        )?;
+    } else if let Some(first_block) = activity
+        .iter()
+        .map(|snapshot| snapshot.checkpoint.to_block)
+        .min()
+    {
+        let first_block =
+            i64::try_from(first_block).context("activity pruning block overflows postgres")?;
+        tx.execute(
+            "delete from ugraph_entity_changes where deployment = $1 and block_number >= $2",
+            &[&deployment, &first_block],
+        )?;
+        tx.execute(
+            "delete from ugraph_sync_checkpoints where deployment = $1 and block_number >= $2",
+            &[&deployment, &first_block],
+        )?;
+    }
+
+    let mut previous_entities = if replace_activity {
+        BTreeMap::new()
+    } else if let Some(baseline) = activity_baseline {
+        entity_map(&baseline.entities)
+    } else {
+        load_current_entity_map(tx, deployment)?
+    };
+    let mut ordered_activity = BTreeMap::new();
+    for snapshot in activity {
+        ordered_activity.insert(snapshot.checkpoint.to_block, snapshot.clone());
+    }
+
+    for snapshot in ordered_activity.into_values() {
+        let block_number = i64::try_from(snapshot.checkpoint.to_block)
+            .context("activity block overflows postgres")?;
+        let from_block = snapshot
+            .checkpoint
+            .from_block
+            .map(i64::try_from)
+            .transpose()
+            .context("activity from block overflows postgres")?;
+        let block_hash = snapshot.checkpoint.block_hash.as_deref();
+        let block_timestamp = snapshot
+            .checkpoint
+            .block_timestamp
+            .map(i64::try_from)
+            .transpose()
+            .context("activity block timestamp overflows postgres")?;
+        let scanned_logs = i64::try_from(snapshot.checkpoint.scanned_logs)
+            .context("activity scanned log count overflows postgres")?;
+        let executed_logs = i64::try_from(snapshot.checkpoint.executed_logs)
+            .context("activity executed log count overflows postgres")?;
+        let validation_errors = i64::try_from(snapshot.checkpoint.validation_errors)
+            .context("activity validation error count overflows postgres")?;
+        let complete = snapshot.checkpoint.complete;
+        let current_entities = entity_map(&snapshot.entities);
+        let changes = changed_entity_versions(&previous_entities, &current_entities);
+        let entity_changes = i32::try_from(changes.len())
+            .context("activity entity change count overflows postgres")?;
+
+        tx.execute(
+            r#"
+            insert into ugraph_sync_checkpoints (
+              deployment, block_number, block_hash, block_timestamp, from_block,
+              scanned_logs, executed_logs, validation_errors, complete,
+              entity_changes, synced_at
+            )
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+            on conflict (deployment, block_number) do update set
+              block_hash = coalesce(excluded.block_hash, ugraph_sync_checkpoints.block_hash),
+              block_timestamp = coalesce(excluded.block_timestamp, ugraph_sync_checkpoints.block_timestamp),
+              from_block = coalesce(excluded.from_block, ugraph_sync_checkpoints.from_block),
+              scanned_logs = excluded.scanned_logs,
+              executed_logs = excluded.executed_logs,
+              validation_errors = excluded.validation_errors,
+              complete = excluded.complete,
+              entity_changes = excluded.entity_changes,
+              synced_at = now()
+            "#,
+            &[
+                &deployment,
+                &block_number,
+                &block_hash,
+                &block_timestamp,
+                &from_block,
+                &scanned_logs,
+                &executed_logs,
+                &validation_errors,
+                &complete,
+                &entity_changes,
+            ],
+        )?;
+
+        for row in changes {
+            let key = (row.entity.clone(), row.id.clone());
+            let action = if row.removed {
+                EntityChangeAction::Removed
+            } else if previous_entities.contains_key(&key) {
+                EntityChangeAction::Updated
+            } else {
+                EntityChangeAction::Created
+            };
+            let action = action.as_str();
+            let data = serde_json::to_value(&row.data)?;
+            tx.execute(
+                r#"
+                insert into ugraph_entity_changes (
+                  deployment, block_number, block_hash, block_timestamp,
+                  entity, id, action, data, updated_at
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+                on conflict (deployment, block_number, entity, id) do update set
+                  block_hash = coalesce(excluded.block_hash, ugraph_entity_changes.block_hash),
+                  block_timestamp = coalesce(excluded.block_timestamp, ugraph_entity_changes.block_timestamp),
+                  action = excluded.action,
+                  data = excluded.data,
+                  updated_at = now()
+                "#,
+                &[
+                    &deployment,
+                    &block_number,
+                    &block_hash,
+                    &block_timestamp,
+                    &row.entity,
+                    &row.id,
+                    &action,
+                    &data,
+                ],
+            )?;
+        }
+
+        previous_entities = current_entities;
+    }
+    Ok(())
+}
+
+fn load_current_entity_map(
+    tx: &mut postgres::Transaction<'_>,
+    deployment: &str,
+) -> anyhow::Result<BTreeMap<(String, String), EntityData>> {
+    let mut entities = BTreeMap::new();
+    for row in tx.query(
+        "select entity, id, data from ugraph_entities where deployment = $1 order by entity, id",
+        &[&deployment],
+    )? {
+        let data_value: Value = row.get("data");
+        entities.insert(
+            (row.get("entity"), row.get("id")),
+            serde_json::from_value(data_value).context("decoding postgres entity data")?,
+        );
+    }
+    Ok(entities)
 }
 
 fn write_postgres_history(
@@ -1946,6 +2185,105 @@ create index if not exists ugraph_entity_versions_entity_id
 create index if not exists ugraph_entity_versions_data_gin
   on ugraph_entity_versions using gin (data);
 
+create table if not exists ugraph_sync_checkpoints (
+  deployment text not null references ugraph_deployments(id) on delete cascade,
+  block_number bigint not null,
+  block_hash text,
+  block_timestamp bigint,
+  from_block bigint,
+  scanned_logs bigint not null default 0,
+  executed_logs bigint not null default 0,
+  validation_errors bigint not null default 0,
+  complete boolean not null default false,
+  entity_changes integer not null default 0,
+  synced_at timestamptz not null default now(),
+  primary key (deployment, block_number)
+);
+
+create index if not exists ugraph_sync_checkpoints_synced_at
+  on ugraph_sync_checkpoints (deployment, synced_at desc);
+
+create table if not exists ugraph_entity_changes (
+  deployment text not null references ugraph_deployments(id) on delete cascade,
+  block_number bigint not null,
+  block_hash text,
+  block_timestamp bigint,
+  entity text not null,
+  id text not null,
+  action text not null,
+  data jsonb not null,
+  updated_at timestamptz not null default now(),
+  primary key (deployment, block_number, entity, id),
+  check (action in ('created', 'updated', 'removed'))
+);
+
+create index if not exists ugraph_entity_changes_block
+  on ugraph_entity_changes (deployment, block_number desc);
+
+create index if not exists ugraph_entity_changes_entity_id
+  on ugraph_entity_changes (deployment, entity, id, block_number);
+
+create index if not exists ugraph_entity_changes_data_gin
+  on ugraph_entity_changes using gin (data);
+
+insert into ugraph_sync_checkpoints (
+  deployment, block_number, block_hash, block_timestamp, from_block,
+  scanned_logs, executed_logs, validation_errors, complete, entity_changes, synced_at
+)
+select
+  h.deployment,
+  h.block_number,
+  h.block_hash,
+  nullif(h.checkpoint->>'block_timestamp', '')::bigint,
+  nullif(h.checkpoint->>'from_block', '')::bigint,
+  coalesce(nullif(h.checkpoint->>'scanned_logs', '')::bigint, 0),
+  coalesce(nullif(h.checkpoint->>'executed_logs', '')::bigint, 0),
+  coalesce(nullif(h.checkpoint->>'validation_errors', '')::bigint, 0),
+  coalesce(nullif(h.checkpoint->>'complete', '')::boolean, false),
+  coalesce(v.entity_changes, 0),
+  h.updated_at
+from ugraph_history_snapshots h
+left join (
+  select deployment, block_number, count(*)::integer as entity_changes
+  from ugraph_entity_versions
+  group by deployment, block_number
+) v on v.deployment = h.deployment and v.block_number = h.block_number
+on conflict (deployment, block_number) do nothing;
+
+insert into ugraph_entity_changes (
+  deployment, block_number, block_hash, block_timestamp,
+  entity, id, action, data, updated_at
+)
+select
+  v.deployment,
+  v.block_number,
+  h.block_hash,
+  nullif(h.checkpoint->>'block_timestamp', '')::bigint,
+  v.entity,
+  v.id,
+  case
+    when v.removed then 'removed'
+    when prev.block_number is null or prev.removed then 'created'
+    else 'updated'
+  end,
+  v.data,
+  h.updated_at
+from ugraph_entity_versions v
+join ugraph_history_snapshots h
+  on h.deployment = v.deployment
+ and h.block_number = v.block_number
+left join lateral (
+  select p.block_number, p.removed
+  from ugraph_entity_versions p
+  where p.deployment = v.deployment
+    and p.entity = v.entity
+    and p.id = v.id
+    and p.block_number < v.block_number
+  order by p.block_number desc
+  limit 1
+) prev on true
+on conflict (deployment, block_number, entity, id) do nothing;
+
 create table if not exists ugraph_feed_subscriptions (
   chain_id bigint not null,
   deployment text not null,
@@ -2113,6 +2451,12 @@ mod tests {
         assert_eq!(page.page, 1);
         assert_eq!(page.limit, 3);
         assert!(!page.show_empty);
+        assert_eq!(page.stats.change_blocks, 3);
+        assert_eq!(page.stats.indexed_checkpoints, 4);
+        assert_eq!(page.stats.entity_changes, 5);
+        assert_eq!(page.stats.created, 2);
+        assert_eq!(page.stats.updated, 2);
+        assert_eq!(page.stats.removed, 1);
         assert_eq!(activity.len(), 3);
         assert_eq!(activity[0].block_number, 3);
         assert_eq!(activity[0].block_hash.as_deref(), Some("0xblock3"));
@@ -2135,6 +2479,30 @@ mod tests {
         assert_eq!(page.activities.len(), 1);
         assert_eq!(page.activities[0].block_number, 4);
         assert!(page.activities[0].changes.is_empty());
+
+        let mut next_snapshot = snapshot.clone();
+        next_snapshot.entities = vec![
+            fixture_entity("Protocol", "side", "0x11"),
+            fixture_entity("Protocol", "late", "0x20"),
+        ];
+        let baseline = snapshot_from_history(&snapshot.history[3]);
+        let new_activity = vec![HistoricalSnapshot {
+            checkpoint: fixture_checkpoint(5),
+            entities: next_snapshot.entities.clone(),
+            dynamic_sources: Vec::new(),
+        }];
+        store.write_with_activity(&next_snapshot, &new_activity, Some(&baseline), false)?;
+
+        let page = recent_sync_activity(&url, &deployment, 1, 10, 10, false)?;
+        assert_eq!(page.stats.change_blocks, 4);
+        assert_eq!(page.stats.entity_changes, 6);
+        assert!(page.activities.iter().any(|activity| {
+            activity.block_number == 5
+                && activity.created == 1
+                && activity.changes.iter().any(|change| {
+                    change.id == "late" && change.action == EntityChangeAction::Created
+                })
+        }));
 
         cleanup(&url, &deployment)?;
         Ok(())
@@ -2414,5 +2782,14 @@ mod tests {
                 dynamic_sources: Vec::new(),
             }],
         }
+    }
+
+    fn snapshot_from_history(history: &HistoricalSnapshot) -> StoreSnapshot {
+        let mut snapshot = fixture_snapshot();
+        snapshot.checkpoint = history.checkpoint.clone();
+        snapshot.entities = history.entities.clone();
+        snapshot.dynamic_sources = history.dynamic_sources.clone();
+        snapshot.history = Vec::new();
+        snapshot
     }
 }

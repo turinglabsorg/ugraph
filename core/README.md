@@ -19,42 +19,43 @@ WASM should be loadable without rewriting the subgraph for a proprietary format.
 
 ## Commands
 
+Run from the repository root:
+
 ```bash
-cd core
 cargo test
-cargo run -p ugraph -- validate --manifest examples/growfi/subgraph.yaml
-cargo run -p ugraph -- inspect --manifest examples/growfi/subgraph.yaml
+cargo run -p ugraph -- validate --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph -- inspect --manifest core/examples/growfi/subgraph.yaml
 cargo run -p ugraph -- rpc --chain-id 11155111
-cargo run -p ugraph -- compat --build-dir examples/growfi/build
-cargo run -p ugraph -- runtime-check --build-dir examples/growfi/build
-cargo run -p ugraph -- handler-exports --manifest examples/growfi/subgraph.yaml
-cargo run -p ugraph -- handler-signatures --manifest examples/growfi/subgraph.yaml
-cargo run -p ugraph -- abi-events --manifest examples/growfi/subgraph.yaml
-cargo run -p ugraph -- plan --manifest examples/growfi/subgraph.yaml
-cargo run -p ugraph -- schema --manifest examples/growfi/subgraph.yaml
-cargo run -p ugraph -- scan --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block 10845295 --to-block 10846000
-cargo run -p ugraph -- replay --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block 10845480 --to-block 10845480
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block 10845295 --to-block 10846000
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --watch --poll-interval-ms 1000
+cargo run -p ugraph -- compat --build-dir core/examples/growfi/build
+cargo run -p ugraph -- runtime-check --build-dir core/examples/growfi/build
+cargo run -p ugraph -- handler-exports --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph -- handler-signatures --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph -- abi-events --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph -- plan --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph -- schema --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph -- scan --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block 10845295 --to-block 10846000
+cargo run -p ugraph -- replay --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block 10845480 --to-block 10845480
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block 10845295 --to-block 10846000
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --watch --poll-interval-ms 1000
 cargo run -p ugraph -- serve --state-file .ugraph/state.json --port 8030
 cargo run -p ugraph -- compare --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --query '<graphql>'
-cargo run -p ugraph -- conformance --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
-cargo run -p ugraph -- matrix --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --to-block 10846000 --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --rpc-url <rpc>
-cargo run -p ugraph -- chain-reader --manifest examples/growfi/subgraph.yaml --postgres-url <postgres-url> --deployment growfi --chain-id 11155111 --rpc-url <rpc> --watch
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --log-source postgres-feed --chain-id 11155111 --rpc-url <rpc>
+cargo run -p ugraph -- conformance --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --cases-file core/examples/growfi/conformance.json
+cargo run -p ugraph -- matrix --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --to-block 10846000 --endpoint <hosted-graphql-url> --cases-file core/examples/growfi/conformance.json
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --rpc-url <rpc>
+cargo run -p ugraph -- chain-reader --manifest core/examples/growfi/subgraph.yaml --postgres-url <postgres-url> --deployment growfi --chain-id 11155111 --rpc-url <rpc> --watch
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --log-source postgres-feed --chain-id 11155111 --rpc-url <rpc>
 cargo run -p ugraph -- users --postgres-url <postgres-url> create --email ops@example.com --role admin
 cargo run -p ugraph -- users --postgres-url <postgres-url> key create --email ops@example.com --name cli --scope deploy --scope query
 cargo run -p ugraph -- users --postgres-url <postgres-url> signup status
 cargo run -p ugraph -- users --postgres-url <postgres-url> signup disable
-cargo run -p ugraph -- deploy --provider local --manifest examples/growfi/subgraph.yaml --storage postgres --postgres-url <postgres-url> --deployment growfi --version v1 --visibility public --api-key <ugraph-api-key> --chain-id 11155111 --rpc-url <rpc>
+cargo run -p ugraph -- deploy --provider local --manifest core/examples/growfi/subgraph.yaml --storage postgres --postgres-url <postgres-url> --deployment growfi --version v1 --visibility public --api-key <ugraph-api-key> --chain-id 11155111 --rpc-url <rpc>
 cargo run -p ugraph -- deployments --postgres-url <postgres-url> list
 cargo run -p ugraph -- deployments --postgres-url <postgres-url> register --deployment growfi --version v1 --visibility public
 cargo run -p ugraph -- deployments --postgres-url <postgres-url> set-visibility --deployment growfi --visibility private
 cargo run -p ugraph -- serve --storage postgres --deployment growfi --postgres-url <postgres-url> --port 8030
-cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml
-docker build -t ugraph-core:local .
-docker compose up --build
+cargo run -p ugraph -- doctor --manifest core/examples/growfi/subgraph.yaml
+docker build -f core/Dockerfile -t ugraph-core:local .
+docker compose -f core/docker-compose.yml up --build
 ```
 
 ## Environment
@@ -95,12 +96,13 @@ The image uses the same binary for the API and indexer:
   `/metrics`. It also accepts hosted-provider compatible query paths at
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. The public status page lists
-  public deployments with their deployer metadata and recent retained sync
-  blocks with created/updated/removed entity deltas. Empty sync blocks are
-  hidden by default; use `show_empty=1` to include them. `sync_page` and
-  `sync_limit` paginate the log. `UGRAPH_CHAIN_ID` selects the default block
-  explorer, and `UGRAPH_BLOCK_EXPLORER_URL` can override it with either a base
-  URL or a `{block}` template.
+  public deployments with their deployer metadata and the append-only entity
+  change timeline: block, timestamp, explorer link, and created/updated/removed
+  entities. By default it shows blocks where entities changed; use
+  `show_empty=1` to include indexed checkpoints without entity changes.
+  `sync_page` and `sync_limit` paginate the view. `UGRAPH_CHAIN_ID` selects the
+  default block explorer, and `UGRAPH_BLOCK_EXPLORER_URL` can override it with
+  either a base URL or a `{block}` template.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
 - `UGRAPH_MODE=chain-reader` reads one `chain_id` from RPC and writes raw logs
   into Postgres for every registered subscription on that chain. If no explicit
@@ -136,7 +138,9 @@ indexer worker, and the API locally. The API reloads the selected store on each
 GraphQL request, so writes committed by the indexer are visible without
 restarting the server. Current-state GraphQL queries skip retained history and
 processed-log cursors; those rows are loaded only when a query contains a
-historical `block:` argument.
+historical `block:` argument. The entity change timeline is stored separately
+from retained historical state, so pruning `UGRAPH_HISTORY_LIMIT` does not
+delete the audit trail of when entities were created, updated, or removed.
 
 Production should evolve toward a shared chain feed. Instead of every subgraph
 deployment calling `eth_getLogs` for the same chain, one `chain-reader` per
@@ -182,7 +186,7 @@ ugraph users --postgres-url <postgres-url> key create \
 
 UGRAPH_API_KEY=<ugraph-api-key> \
 ugraph deploy --provider local \
-  --manifest examples/growfi/subgraph.yaml \
+  --manifest core/examples/growfi/subgraph.yaml \
   --storage postgres \
   --postgres-url <postgres-url> \
   --deployment growfi \
@@ -240,8 +244,8 @@ The first milestone is compatibility plumbing:
   Aave v3 mainnet subgraph builds and replays successfully for an initial
   mainnet window; `doctor` flags one upstream manifest/export mismatch.
 
-GrowFi lives under `examples/growfi/` as a real compatibility fixture, not as
-hardcoded runtime logic.
+GrowFi lives under `core/examples/growfi/` as a real compatibility fixture, not
+as hardcoded runtime logic.
 
 See `docs/graph-node-compatibility.md` for the concrete Graph Node surface that
 must be replicated before claiming Goldsky equivalence.
@@ -286,7 +290,9 @@ normalized current-state tables for deployments, entities, dynamic sources, and
 processed-log cursors. Retained historical checkpoints are also persisted in
 separate Postgres history tables with compact entity-version deltas per
 retained block and tombstones for removals, while keeping the same
-`StoreSnapshot` load path used by the query server.
+`StoreSnapshot` load path used by the query server. Entity changes are also
+written to the separate `ugraph_entity_changes` audit trail, which is not
+pruned by `UGRAPH_HISTORY_LIMIT`.
 `sync --watch` repeats that same deterministic pass on a polling interval for
 live indexing. Transient sync failures are logged as JSON and retried with
 capped exponential backoff using `UGRAPH_RETRY_MAX_MS`.

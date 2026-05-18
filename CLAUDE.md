@@ -37,10 +37,13 @@
   `--help`.
 - The public homepage is served from `/` and `/status` as a brutalist
   terminal-style status page with a single `made by turinglabs_` credit linked
-  to `https://turinglabs.org`. It lists public deployment metadata and recent
-  retained sync blocks with created/updated/removed entity deltas. Empty sync
-  blocks are hidden by default, can be shown with `show_empty=1`, and the log
-  view is paginated with `sync_page` and `sync_limit`. When the API gets
+  to `https://turinglabs.org`. It lists public deployment metadata and the
+  append-only entity change timeline from `ugraph_entity_changes`: block,
+  emitted timestamp, explorer link, and created/updated/removed entities.
+  Blocks without entity changes are hidden by default, can be shown with
+  `show_empty=1`, and the view is paginated with `sync_page` and `sync_limit`.
+  This audit trail is separate from the retained history cache used for
+  historical GraphQL queries and rollback. When the API gets
   `UGRAPH_CHAIN_ID` or `UGRAPH_BLOCK_EXPLORER_URL`, sync rows link blocks to
   the correct explorer and show emitted timestamps for newly written
   checkpoints. GraphiQL is served from pinned React/GraphiQL assets, uses

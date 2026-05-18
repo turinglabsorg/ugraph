@@ -2,7 +2,9 @@
 
 ## Project Shape
 
-- `core/` is the canonical Rust workspace. It contains the Graph Node/Goldsky-compatible runtime, manifest parser, ABI checks, WASM checks, RPC scanner, CLI, docs, and compatibility fixtures.
+- The repository root is the Rust workspace. `core/` contains the Graph
+  Protocol-compatible libraries, docs, Docker runtime assets, and compatibility
+  fixtures. `cli/` contains the `ugraph` binary.
 - `infra/` is reserved for taking `core` online: Docker images, Cloud Run service definitions, managed database wiring, secrets, observability, and deployment scripts.
 - The project must stay agnostic. GrowFi under `core/examples/growfi/` is only a real fixture, never hardcoded business logic.
 
@@ -10,9 +12,9 @@
 
 - `core` must accept standard Graph Protocol subgraphs as-is: `subgraph.yaml`, `schema.graphql`, ABI files, templates, handlers, and compiled AssemblyScript WASM.
 - Do not claim Goldsky equivalence until mapping execution, Graph host exports, entity store semantics, dynamic data sources, GraphQL query responses, and fixed-block output diffs are implemented.
-- The compatibility gate starts with `cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml` from `core/`.
+- The compatibility gate starts with `cargo run -p ugraph -- doctor --manifest core/examples/growfi/subgraph.yaml` from the repository root.
 - The runtime must call AssemblyScript `_start` after instantiation. graph-ts global/static constants are not valid before `_start`.
-- The first real replay path is `cargo run -p ugraph -- replay --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block <n> --to-block <n>` from `core/`.
+- The first real replay path is `cargo run -p ugraph -- replay --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block <n> --to-block <n>` from the repository root.
 - `replay` currently executes real compiled graph-ts handlers, decodes in-memory `store.set` entities, and keeps that entity store shared across replayed logs. The GrowFi `handleGrowfiContractsSet` fixture writes a decoded `Protocol` entity with Bytes fields from a live Sepolia log.
 - `dataSource.create` is captured from graph-ts WASM as template name plus string params. `replay` instantiates those templates from the manifest, scans the created addresses, and queues their logs. A live GrowFi replay discovers `Campaign`, `StakingVault`, and `HarvestManager`, then executes `templates/Campaign/Campaign.wasm`.
 - `dataSource.createWithContext` captures graph-ts `DataSourceContext`
@@ -71,7 +73,9 @@
   retained history snapshots are only emitted after complete blocks.
 - `core sync` retains historical snapshots via `UGRAPH_HISTORY_LIMIT`; `0`
   keeps all retained snapshots. Postgres stores retained checkpoints and
-  compact entity-version deltas in dedicated history tables.
+  compact entity-version deltas in dedicated history tables. Entity-change
+  audit rows are stored separately in `ugraph_entity_changes` and are not
+  pruned by `UGRAPH_HISTORY_LIMIT`.
 - `core scan/sync` chunks `eth_getLogs` with `UGRAPH_MAX_BLOCK_RANGE`, retries
   transient RPC failures with `UGRAPH_RPC_RETRIES`, bounds individual requests
   with `UGRAPH_RPC_TIMEOUT_SECS`, and splits range-limit failures recursively.
@@ -91,11 +95,11 @@
   responsive while the indexer is writing.
 - `core serve` exposes `/` and `/status` as the public terminal-style
   operational homepage, plus `/metrics` in Prometheus text format. The homepage
-  should list all public deployment metadata for the instance and the recent
-  retained sync blocks for the selected deployment, including
-  created/updated/removed entity deltas per block. Sync blocks are paginated
-  with `sync_page` and `sync_limit`, hide empty blocks by default, and can show
-  empty blocks with `show_empty=1`. When `UGRAPH_CHAIN_ID` or
+  should list all public deployment metadata for the instance and the
+  append-only entity change timeline for the selected deployment, including
+  created/updated/removed entity deltas per block. Change blocks are paginated
+  with `sync_page` and `sync_limit`, and `show_empty=1` switches to indexed
+  checkpoints without requiring entity changes. When `UGRAPH_CHAIN_ID` or
   `UGRAPH_BLOCK_EXPLORER_URL` is configured, each block links to the matching
   explorer and newly synced checkpoints include the emitted block timestamp.
 - `core serve` accepts hosted-provider compatible versioned query paths:

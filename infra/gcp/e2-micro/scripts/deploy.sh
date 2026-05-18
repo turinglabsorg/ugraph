@@ -179,7 +179,7 @@ if [ -n "$DO_DNS_ZONE" ]; then
 fi
 
 echo "building linux/amd64 image locally"
-docker build --platform linux/amd64 -f "${REPO_ROOT}/core/Dockerfile" -t "$UGRAPH_IMAGE" "${REPO_ROOT}/core"
+docker build --platform linux/amd64 -f "${REPO_ROOT}/core/Dockerfile" -t "$UGRAPH_IMAGE" "${REPO_ROOT}"
 docker save "$UGRAPH_IMAGE" | gzip > "${TMP_DIR}/ugraph-image.tar.gz"
 
 cat > "${TMP_DIR}/.env" <<ENV

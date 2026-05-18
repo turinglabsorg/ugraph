@@ -2,7 +2,8 @@ FROM rust:1.88-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
+COPY cli ./cli
+COPY core/crates ./core/crates
 RUN cargo build --release -p ugraph
 
 FROM debian:bookworm-slim
@@ -13,8 +14,8 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/ugraph /usr/local/bin/ugraph
-COPY examples ./examples
-COPY docker/entrypoint.sh /usr/local/bin/ugraph-entrypoint
+COPY core/examples ./examples
+COPY core/docker/entrypoint.sh /usr/local/bin/ugraph-entrypoint
 RUN chmod +x /usr/local/bin/ugraph-entrypoint
 
 ENV UGRAPH_HOST=0.0.0.0

@@ -1,8 +1,9 @@
 FROM rust:1.88-bookworm AS builder
 
-WORKDIR /app/core
-COPY core/Cargo.toml core/Cargo.lock ./
-COPY core/crates ./crates
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY cli ./cli
+COPY core/crates ./core/crates
 
 RUN cargo build --release -p ugraph
 
@@ -12,6 +13,6 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/core/target/release/ugraph /usr/local/bin/ugraph
+COPY --from=builder /app/target/release/ugraph /usr/local/bin/ugraph
 
 ENTRYPOINT ["ugraph"]

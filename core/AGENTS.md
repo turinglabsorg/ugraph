@@ -2,30 +2,31 @@
 
 ## Role
 
-This workspace is the `ugraph` core: the Rust compatibility layer for Graph
-Node/Goldsky subgraphs.
+This folder is the `ugraph` core: the Rust compatibility libraries, fixtures,
+Docker assets, and documentation for Graph Protocol subgraphs. The CLI binary
+lives in `../cli`.
 
 ## Commands
 
-Run from this directory:
+Run from the repository root:
 
 ```bash
 cargo test
-cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml
-cargo run -p ugraph -- replay --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block <n> --to-block <n>
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --state-file .ugraph/state.json --from-block <n> --to-block <n>
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --state-file .ugraph/state.json --watch --poll-interval-ms 1000
+cargo run -p ugraph -- doctor --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph -- replay --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --from-block <n> --to-block <n>
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --state-file .ugraph/state.json --from-block <n> --to-block <n>
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --state-file .ugraph/state.json --watch --poll-interval-ms 1000
 cargo run -p ugraph -- serve --state-file .ugraph/state.json --port 8030
 cargo run -p ugraph -- compare --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --query '<graphql>'
-cargo run -p ugraph -- conformance --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
-cargo run -p ugraph -- matrix --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --to-block <n> --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment <id> --postgres-url <url> --rpc-url <rpc> --from-block <n> --to-block <n>
-cargo run -p ugraph -- chain-reader --manifest examples/growfi/subgraph.yaml --postgres-url <url> --deployment <id> --chain-id 11155111 --rpc-url <rpc> --watch
-cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment <id> --postgres-url <url> --log-source postgres-feed --chain-id 11155111 --rpc-url <rpc> --from-block <n> --to-block <n>
-cargo run -p ugraph -- deploy --provider local --manifest examples/growfi/subgraph.yaml --storage postgres --postgres-url <url> --deployment <id> --chain-id 11155111 --rpc-url <rpc>
+cargo run -p ugraph -- conformance --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --cases-file core/examples/growfi/conformance.json
+cargo run -p ugraph -- matrix --manifest core/examples/growfi/subgraph.yaml --rpc-url <rpc> --to-block <n> --endpoint <hosted-graphql-url> --cases-file core/examples/growfi/conformance.json
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --storage postgres --deployment <id> --postgres-url <url> --rpc-url <rpc> --from-block <n> --to-block <n>
+cargo run -p ugraph -- chain-reader --manifest core/examples/growfi/subgraph.yaml --postgres-url <url> --deployment <id> --chain-id 11155111 --rpc-url <rpc> --watch
+cargo run -p ugraph -- sync --manifest core/examples/growfi/subgraph.yaml --storage postgres --deployment <id> --postgres-url <url> --log-source postgres-feed --chain-id 11155111 --rpc-url <rpc> --from-block <n> --to-block <n>
+cargo run -p ugraph -- deploy --provider local --manifest core/examples/growfi/subgraph.yaml --storage postgres --postgres-url <url> --deployment <id> --chain-id 11155111 --rpc-url <rpc>
 cargo run -p ugraph -- serve --storage postgres --deployment <id> --postgres-url <url> --port 8030
-docker build -t ugraph-core:local .
-docker compose up --build
+docker build -f core/Dockerfile -t ugraph-core:local .
+docker compose -f core/docker-compose.yml up --build
 ```
 
 ## Scope
@@ -120,10 +121,12 @@ docker compose up --build
 - `serve` reloads the selected store on each GraphQL/health request so API
   containers see Postgres writes from indexer containers without restart.
 - `serve` exposes `/graphql` plus GraphiQL. `/` and `/status` render the public
-  brutalist status page. The sync log is paginated by `sync_page`/`sync_limit`,
-  hides empty blocks by default, supports `show_empty=1`, and links block rows
-  to the configured explorer through `UGRAPH_CHAIN_ID` or
-  `UGRAPH_BLOCK_EXPLORER_URL`.
+  brutalist status page. The main operational log is the append-only entity
+  change timeline from `ugraph_entity_changes`, not the retained history cache.
+  It is paginated by `sync_page`/`sync_limit`, shows only entity-change blocks
+  by default, supports `show_empty=1` for indexed checkpoints without entity
+  changes, and links block rows to the configured explorer through
+  `UGRAPH_CHAIN_ID` or `UGRAPH_BLOCK_EXPLORER_URL`.
   Current query support covers POST/GET `/graphql`, CORS preflight,
   `operationName`, variables, `_meta.block.number`, `hasIndexingErrors`,
   entity lookup by ID, plural entity lists, `where`, nested direct relations,
@@ -140,7 +143,7 @@ docker compose up --build
   `purchase.campaign`. The latest smoke query also covered named fragments,
   inline fragments, `@include`, and `@skip`.
 - `ugraph conformance` runs batch hosted-provider diffs from JSON case files.
-  The GrowFi fixture cases live at `examples/growfi/conformance.json`.
+  The GrowFi fixture cases live at `core/examples/growfi/conformance.json`.
 - `ugraph matrix` is the repeatable compatibility gate: it runs structural
   `doctor`, optional bounded sync when `--to-block` is provided, and optional
   GraphQL conformance when both `--endpoint` and `--cases-file` are provided.
@@ -221,8 +224,9 @@ docker compose up --build
 
 Postgres is the canonical production store target. The implemented storage
 backends are durable JSON snapshots and transactional Postgres current-state
-tables plus compact retained history tables. SQLite is only for local
-development and focused tests. Redis is out of scope.
+tables plus compact retained history tables. Entity changes are stored in a
+separate append-only audit trail. SQLite is only for local development and
+focused tests. Redis is out of scope.
 
 ## Containers
 
@@ -240,7 +244,8 @@ The single Docker image is mode-driven:
   matching block.
 - `UGRAPH_REORG_CHECK_DEPTH` bounds rollback checkpoint probes.
 - `UGRAPH_HISTORY_LIMIT` bounds retained current-state historical snapshots;
-  `0` keeps all retained snapshots.
+  `0` keeps all retained snapshots. This does not prune `ugraph_entity_changes`,
+  which is the append-only entity audit trail.
 - `UGRAPH_MAX_BLOCK_RANGE` and `UGRAPH_RPC_RETRIES` harden RPC log scanning.
 - `UGRAPH_RPC_TIMEOUT_SECS` bounds individual RPC and registry HTTP requests.
 - The API exposes `/status` for an HTML operator view, `/healthz` for

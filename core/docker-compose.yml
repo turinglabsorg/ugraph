@@ -17,7 +17,8 @@ services:
 
   chain-reader:
     build:
-      context: .
+      context: ..
+      dockerfile: core/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,7 +39,8 @@ services:
 
   indexer:
     build:
-      context: .
+      context: ..
+      dockerfile: core/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,7 +71,8 @@ services:
 
   api:
     build:
-      context: .
+      context: ..
+      dockerfile: core/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy

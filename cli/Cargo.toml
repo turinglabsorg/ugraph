@@ -19,5 +19,5 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tiny-keccak.workspace = true
-ugraph-core = { path = "../ugraph-core" }
-ugraph-runtime = { path = "../ugraph-runtime" }
+ugraph-core = { path = "../core/crates/ugraph-core" }
+ugraph-runtime = { path = "../core/crates/ugraph-runtime" }
