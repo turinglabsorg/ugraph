@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use ugraph_core::{
     build_indexing_plan, check_handler_exports, check_manifest_abi_events, compatibility_report,
     exports_by_file, imports_by_file, inspect_wasm_tree, instantiate_dynamic_source,
-    resolve_rpc_urls, scan_planned_source, scan_static_sources, EntitySchema, Manifest, MatchedLog,
-    RpcResolverOptions, ScanOptions, ScanSourceReport,
+    latest_block_number, resolve_rpc_urls, scan_planned_source, scan_raw_logs, scan_static_sources,
+    EntitySchema, Manifest, MatchedLog, RpcResolverOptions, ScanOptions, ScanReport,
+    ScanSourceReport, SourcePlan,
 };
 
 use crate::state::{
@@ -42,6 +43,17 @@ struct Cli {
 enum StorageKind {
     Json,
     Postgres,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, ValueEnum)]
+enum LogSourceKind {
+    Rpc,
+    PostgresFeed,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, ValueEnum)]
+enum DeployProvider {
+    Local,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -177,6 +189,8 @@ enum Command {
         chain_id: u64,
         #[arg(long, env = "UGRAPH_RPC_URL")]
         rpc_url: Option<String>,
+        #[arg(long, env = "UGRAPH_LOG_SOURCE", value_enum, default_value = "rpc")]
+        log_source: LogSourceKind,
         #[arg(long)]
         from_block: Option<u64>,
         #[arg(long)]
@@ -208,6 +222,75 @@ enum Command {
         rpc_retries: u32,
         #[arg(long)]
         strict_schema: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one chain once and write raw logs into the shared Postgres feed.
+    ChainReader {
+        #[arg(short, long)]
+        manifest: Option<PathBuf>,
+        #[arg(long, env = "UGRAPH_POSTGRES_URL")]
+        postgres_url: String,
+        #[arg(long, env = "UGRAPH_DEPLOYMENT", default_value = "default")]
+        deployment: String,
+        #[arg(long, env = "UGRAPH_CHAIN_ID", default_value_t = 11155111)]
+        chain_id: u64,
+        #[arg(long, env = "UGRAPH_RPC_URL")]
+        rpc_url: Option<String>,
+        #[arg(long)]
+        from_block: Option<u64>,
+        #[arg(long)]
+        to_block: Option<u64>,
+        #[arg(long)]
+        watch: bool,
+        #[arg(long, env = "UGRAPH_POLL_INTERVAL_MS", default_value_t = 1_000)]
+        poll_interval_ms: u64,
+        #[arg(long, env = "UGRAPH_RETRY_MAX_MS", default_value_t = 60_000)]
+        retry_max_ms: u64,
+        #[arg(long, env = "UGRAPH_MAX_BLOCK_RANGE", default_value_t = 2_000)]
+        max_block_range: u64,
+        #[arg(long, env = "UGRAPH_RPC_RETRIES", default_value_t = 3)]
+        rpc_retries: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Register and sync a deployment against local infrastructure.
+    Deploy {
+        #[arg(long, value_enum, default_value = "local")]
+        provider: DeployProvider,
+        #[arg(short, long, default_value = "subgraph.yaml")]
+        manifest: PathBuf,
+        #[arg(long)]
+        build_dir: Option<PathBuf>,
+        #[arg(long, env = "UGRAPH_STORAGE", value_enum, default_value = "postgres")]
+        storage: StorageKind,
+        #[arg(long, env = "UGRAPH_POSTGRES_URL")]
+        postgres_url: Option<String>,
+        #[arg(long, env = "UGRAPH_DEPLOYMENT", default_value = "default")]
+        deployment: String,
+        #[arg(long, env = "UGRAPH_CHAIN_ID", default_value_t = 11155111)]
+        chain_id: u64,
+        #[arg(long, env = "UGRAPH_RPC_URL")]
+        rpc_url: Option<String>,
+        #[arg(
+            long,
+            env = "UGRAPH_LOG_SOURCE",
+            value_enum,
+            default_value = "postgres-feed"
+        )]
+        log_source: LogSourceKind,
+        #[arg(long)]
+        from_block: Option<u64>,
+        #[arg(long)]
+        to_block: Option<u64>,
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
+        #[arg(long)]
+        reset: bool,
+        #[arg(long, env = "UGRAPH_MAX_BLOCK_RANGE", default_value_t = 2_000)]
+        max_block_range: u64,
+        #[arg(long, env = "UGRAPH_RPC_RETRIES", default_value_t = 3)]
+        rpc_retries: u32,
         #[arg(long)]
         json: bool,
     },
@@ -450,6 +533,7 @@ struct ReplayInput {
     build_dir: PathBuf,
     chain_id: u64,
     rpc_url: Option<String>,
+    log_source: LogSource,
     from_block: Option<u64>,
     to_block: Option<u64>,
     limit: usize,
@@ -458,6 +542,48 @@ struct ReplayInput {
     initial_store: ugraph_runtime::EntityStore,
     known_dynamic_sources: Vec<DynamicSourceSnapshot>,
     processed_logs: BTreeSet<LogIdentity>,
+}
+
+#[derive(Debug, Clone)]
+enum LogSource {
+    Rpc,
+    PostgresFeed {
+        postgres_url: String,
+        deployment: String,
+    },
+}
+
+#[derive(Debug)]
+struct ChainReaderInput {
+    manifest: Option<PathBuf>,
+    postgres_url: String,
+    deployment: String,
+    chain_id: u64,
+    rpc_url: Option<String>,
+    from_block: Option<u64>,
+    to_block: Option<u64>,
+    max_block_range: u64,
+    rpc_retries: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct DeployReport {
+    provider: DeployProvider,
+    deployment: String,
+    log_source: LogSourceKind,
+    feed: Option<storage::FeedIngestReport>,
+    sync: MatrixSyncReport,
+}
+
+struct SourceScanInput<'a> {
+    log_source: &'a LogSource,
+    chain_id: u64,
+    rpc_url: &'a str,
+    source: &'a SourcePlan,
+    from_block: Option<u64>,
+    to_block: u64,
+    max_block_range: u64,
+    rpc_retries: u32,
 }
 
 #[derive(Debug)]
@@ -751,6 +877,7 @@ fn main() -> anyhow::Result<()> {
                 build_dir,
                 chain_id,
                 rpc_url,
+                log_source: LogSource::Rpc,
                 from_block,
                 to_block,
                 limit,
@@ -800,6 +927,7 @@ fn main() -> anyhow::Result<()> {
             deployment,
             chain_id,
             rpc_url,
+            log_source,
             from_block,
             to_block,
             limit,
@@ -828,6 +956,7 @@ fn main() -> anyhow::Result<()> {
                     build_dir: &build_dir,
                     chain_id,
                     rpc_url: rpc_url.clone(),
+                    log_source: log_source_for_sync(log_source, &store)?,
                     from_block: cycle_from_block,
                     to_block,
                     limit,
@@ -885,6 +1014,176 @@ fn main() -> anyhow::Result<()> {
                     }
                     Err(error) => return Err(error),
                 }
+            }
+        }
+        Command::ChainReader {
+            manifest,
+            postgres_url,
+            deployment,
+            chain_id,
+            rpc_url,
+            from_block,
+            to_block,
+            watch,
+            poll_interval_ms,
+            retry_max_ms,
+            max_block_range,
+            rpc_retries,
+            json,
+        } => {
+            let mut failures = 0_u32;
+            loop {
+                let result = run_chain_reader_once(ChainReaderInput {
+                    manifest: manifest.clone(),
+                    postgres_url: postgres_url.clone(),
+                    deployment: deployment.clone(),
+                    chain_id,
+                    rpc_url: rpc_url.clone(),
+                    from_block,
+                    to_block,
+                    max_block_range,
+                    rpc_retries,
+                });
+                match result {
+                    Ok(report) => {
+                        failures = 0;
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            println!("chainId: {}", report.chain_id);
+                            println!("subscriptions: {}", report.subscriptions);
+                            println!(
+                                "toBlock: {}",
+                                report
+                                    .to_block
+                                    .map(|block| block.to_string())
+                                    .unwrap_or_else(|| "<none>".to_string())
+                            );
+                            println!("insertedLogs: {}", report.inserted_logs);
+                        }
+                        if !watch {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(poll_interval_ms));
+                    }
+                    Err(error) if watch => {
+                        failures = failures.saturating_add(1);
+                        let backoff_ms = watch_backoff_ms(poll_interval_ms, retry_max_ms, failures);
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "level": "error",
+                                "event": "chain_reader_error",
+                                "chainId": chain_id,
+                                "error": error.to_string(),
+                                "failures": failures,
+                                "retryInMs": backoff_ms
+                            })
+                        );
+                        thread::sleep(Duration::from_millis(backoff_ms));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Command::Deploy {
+            provider,
+            manifest,
+            build_dir,
+            storage,
+            postgres_url,
+            deployment,
+            chain_id,
+            rpc_url,
+            log_source,
+            from_block,
+            to_block,
+            limit,
+            reset,
+            max_block_range,
+            rpc_retries,
+            json,
+        } => {
+            let build_dir = default_build_dir(&manifest, build_dir);
+            let store = snapshot_store(
+                storage,
+                PathBuf::from(".ugraph/state.json"),
+                postgres_url.clone(),
+                deployment.clone(),
+            )?;
+            let feed = if log_source == LogSourceKind::PostgresFeed {
+                let postgres_url = postgres_url
+                    .clone()
+                    .context("missing --postgres-url for postgres-feed deploy")?;
+                Some(run_chain_reader_once(ChainReaderInput {
+                    manifest: Some(manifest.clone()),
+                    postgres_url,
+                    deployment: deployment.clone(),
+                    chain_id,
+                    rpc_url: rpc_url.clone(),
+                    from_block,
+                    to_block,
+                    max_block_range,
+                    rpc_retries,
+                })?)
+            } else {
+                None
+            };
+            let _indexer_lock = store.acquire_indexer_lock()?;
+            let snapshot = sync_once(SyncOnceInput {
+                store: &store,
+                manifest: &manifest,
+                build_dir: &build_dir,
+                chain_id,
+                rpc_url,
+                log_source: log_source_for_sync(log_source, &store)?,
+                from_block,
+                to_block,
+                limit,
+                reset,
+                reorg_policy: ReorgPolicy::Rollback,
+                reorg_check_depth: 64,
+                history_limit: 1_024,
+                max_block_range,
+                rpc_retries,
+            })?;
+            let report = DeployReport {
+                provider,
+                deployment,
+                log_source,
+                feed,
+                sync: MatrixSyncReport {
+                    ok: snapshot.checkpoint.validation_errors == 0,
+                    store: store.label(),
+                    from_block: snapshot.checkpoint.from_block,
+                    to_block: snapshot.checkpoint.to_block,
+                    block_hash: snapshot.checkpoint.block_hash.clone(),
+                    scanned_logs: snapshot.checkpoint.scanned_logs,
+                    executed_logs: snapshot.checkpoint.executed_logs,
+                    validation_errors: snapshot.checkpoint.validation_errors,
+                    complete: snapshot.checkpoint.complete,
+                    entities: snapshot.entities.len(),
+                    dynamic_sources: snapshot.dynamic_sources.len(),
+                },
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("provider: {:?}", report.provider);
+                println!("deployment: {}", report.deployment);
+                println!("logSource: {:?}", report.log_source);
+                if let Some(feed) = &report.feed {
+                    println!("feedInsertedLogs: {}", feed.inserted_logs);
+                    println!("feedToBlock: {}", feed.to_block.unwrap_or_default());
+                }
+                println!("store: {}", report.sync.store);
+                println!("toBlock: {}", report.sync.to_block);
+                println!("executedLogs: {}", report.sync.executed_logs);
+                println!("entities: {}", report.sync.entities);
+                println!("complete: {}", report.sync.complete);
+            }
+            if !report.sync.ok {
+                std::process::exit(1);
             }
         }
         Command::Serve {
@@ -1174,33 +1473,73 @@ fn main() -> anyhow::Result<()> {
 fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
     let schema = EntitySchema::load_for_manifest(&input.manifest)?;
     let plan = build_indexing_plan(&input.manifest)?;
-    let mut rpc_opts = RpcResolverOptions::for_chain(input.chain_id);
-    rpc_opts.explicit_rpc_url = input.rpc_url;
-    let resolved = resolve_rpc_urls(rpc_opts)?;
-    let mut last_scan_error = None;
-    let mut scan = None;
-    for rpc_url in resolved.urls {
-        match scan_static_sources(ScanOptions {
-            manifest: input.manifest.clone(),
-            rpc_url: rpc_url.clone(),
-            from_block: input.from_block,
-            to_block: input.to_block,
-            max_block_range: input.max_block_range,
-            rpc_retries: input.rpc_retries,
-        }) {
-            Ok(report) => {
-                scan = Some(report);
-                break;
+    let mut feed_backfill_pending = false;
+    let scan = match &input.log_source {
+        LogSource::Rpc => scan_static_sources_with_fallback(
+            input.manifest.clone(),
+            input.chain_id,
+            input.rpc_url.clone(),
+            input.from_block,
+            input.to_block,
+            input.max_block_range,
+            input.rpc_retries,
+        )?,
+        LogSource::PostgresFeed {
+            postgres_url,
+            deployment,
+        } => {
+            let rpc_url = resolve_primary_rpc_url(input.chain_id, input.rpc_url.clone())?;
+            let to_block = match input.to_block {
+                Some(to_block) => to_block,
+                None => storage::latest_feed_block(postgres_url, input.chain_id)?
+                    .context("postgres feed has no cursor yet; start chain-reader first")?,
+            };
+            let static_sources = plan
+                .sources
+                .iter()
+                .filter(|source| !source.template && source.address.is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            storage::register_feed_source_subscriptions(
+                postgres_url,
+                deployment,
+                input.chain_id,
+                &static_sources,
+            )?;
+            let mut sources = Vec::new();
+            for source in static_sources {
+                if !storage::feed_source_caught_up(
+                    postgres_url,
+                    deployment,
+                    input.chain_id,
+                    &source,
+                    to_block,
+                )? {
+                    feed_backfill_pending = true;
+                }
+                sources.push(storage::load_feed_source_report(
+                    postgres_url,
+                    input.chain_id,
+                    &source,
+                    input.from_block,
+                    to_block,
+                )?);
             }
-            Err(error) => {
-                last_scan_error =
-                    Some(anyhow::Error::new(error).context(format!("scanning RPC {rpc_url}")));
+            let mut ordered_logs = sources
+                .iter()
+                .flat_map(|source| source.logs.iter().cloned())
+                .collect::<Vec<_>>();
+            ordered_logs.sort_by_key(log_order_key);
+            ScanReport {
+                rpc_url,
+                from_block: input.from_block,
+                to_block,
+                log_count: ordered_logs.len(),
+                ordered_logs,
+                sources,
             }
         }
-    }
-    let scan = scan.ok_or_else(|| {
-        last_scan_error.unwrap_or_else(|| anyhow::anyhow!("no RPC URLs resolved"))
-    })?;
+    };
 
     let mut executions = Vec::new();
     let mut entity_store = input.initial_store;
@@ -1234,14 +1573,20 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         else {
             continue;
         };
-        let dynamic_scan = scan_planned_source(
-            &scan.rpc_url,
-            &source,
-            scan.from_block,
-            scan.to_block,
-            input.max_block_range,
-            input.rpc_retries,
-        )?;
+        let dynamic_scan = scan_source_for_replay(SourceScanInput {
+            log_source: &input.log_source,
+            chain_id: input.chain_id,
+            rpc_url: &scan.rpc_url,
+            source: &source,
+            from_block: scan.from_block,
+            to_block: scan.to_block,
+            max_block_range: input.max_block_range,
+            rpc_retries: input.rpc_retries,
+        })?;
+        if feed_source_backfill_pending(&input.log_source, input.chain_id, &source, scan.to_block)?
+        {
+            feed_backfill_pending = true;
+        }
         pending_logs.extend(dynamic_scan.logs.clone());
         dynamic_scan_reports.push(dynamic_scan);
     }
@@ -1301,14 +1646,24 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
                 dynamic_source_key(template_name, &address),
                 create.context.clone(),
             );
-            let mut dynamic_scan = scan_planned_source(
-                &scan.rpc_url,
+            let mut dynamic_scan = scan_source_for_replay(SourceScanInput {
+                log_source: &input.log_source,
+                chain_id: input.chain_id,
+                rpc_url: &scan.rpc_url,
+                source: &source,
+                from_block: Some(creation_block),
+                to_block: scan.to_block,
+                max_block_range: input.max_block_range,
+                rpc_retries: input.rpc_retries,
+            })?;
+            if feed_source_backfill_pending(
+                &input.log_source,
+                input.chain_id,
                 &source,
-                Some(creation_block),
                 scan.to_block,
-                input.max_block_range,
-                input.rpc_retries,
-            )?;
+            )? {
+                feed_backfill_pending = true;
+            }
             let current_order = log_order_key(&log);
             dynamic_scan
                 .logs
@@ -1350,13 +1705,21 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
             );
         }
     }
-    let complete = pending_logs
-        .iter()
-        .all(|log| processed_logs.contains(&log_identity(log)));
+    let complete = !feed_backfill_pending
+        && pending_logs
+            .iter()
+            .all(|log| processed_logs.contains(&log_identity(log)));
 
-    let block_hash = fetch_block_hash(&scan.rpc_url, scan.to_block)
-        .ok()
-        .flatten();
+    let block_hash = match &input.log_source {
+        LogSource::Rpc => fetch_block_hash(&scan.rpc_url, scan.to_block)
+            .ok()
+            .flatten(),
+        LogSource::PostgresFeed { postgres_url, .. } => {
+            storage::feed_block_hash(postgres_url, input.chain_id, scan.to_block)
+                .ok()
+                .flatten()
+        }
+    };
     let report = ReplayReport {
         rpc_url: scan.rpc_url,
         from_block: scan.from_block,
@@ -1377,6 +1740,150 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         complete,
         block_hash,
         history,
+    })
+}
+
+fn scan_static_sources_with_fallback(
+    manifest: PathBuf,
+    chain_id: u64,
+    rpc_url: Option<String>,
+    from_block: Option<u64>,
+    to_block: Option<u64>,
+    max_block_range: u64,
+    rpc_retries: u32,
+) -> anyhow::Result<ScanReport> {
+    let mut rpc_opts = RpcResolverOptions::for_chain(chain_id);
+    rpc_opts.explicit_rpc_url = rpc_url;
+    let resolved = resolve_rpc_urls(rpc_opts)?;
+    let mut last_scan_error = None;
+    for rpc_url in resolved.urls {
+        match scan_static_sources(ScanOptions {
+            manifest: manifest.clone(),
+            rpc_url: rpc_url.clone(),
+            from_block,
+            to_block,
+            max_block_range,
+            rpc_retries,
+        }) {
+            Ok(report) => return Ok(report),
+            Err(error) => {
+                last_scan_error =
+                    Some(anyhow::Error::new(error).context(format!("scanning RPC {rpc_url}")));
+            }
+        }
+    }
+    Err(last_scan_error.unwrap_or_else(|| anyhow::anyhow!("no RPC URLs resolved")))
+}
+
+fn scan_source_for_replay(input: SourceScanInput<'_>) -> anyhow::Result<ScanSourceReport> {
+    match input.log_source {
+        LogSource::Rpc => Ok(scan_planned_source(
+            input.rpc_url,
+            input.source,
+            input.from_block,
+            input.to_block,
+            input.max_block_range,
+            input.rpc_retries,
+        )?),
+        LogSource::PostgresFeed {
+            postgres_url,
+            deployment,
+        } => {
+            storage::register_feed_source_subscription(
+                postgres_url,
+                deployment,
+                input.chain_id,
+                input.source,
+            )?;
+            storage::load_feed_source_report(
+                postgres_url,
+                input.chain_id,
+                input.source,
+                input.from_block,
+                input.to_block,
+            )
+        }
+    }
+}
+
+fn feed_source_backfill_pending(
+    log_source: &LogSource,
+    chain_id: u64,
+    source: &SourcePlan,
+    to_block: u64,
+) -> anyhow::Result<bool> {
+    match log_source {
+        LogSource::Rpc => Ok(false),
+        LogSource::PostgresFeed {
+            postgres_url,
+            deployment,
+        } => Ok(!storage::feed_source_caught_up(
+            postgres_url,
+            deployment,
+            chain_id,
+            source,
+            to_block,
+        )?),
+    }
+}
+
+fn run_chain_reader_once(input: ChainReaderInput) -> anyhow::Result<storage::FeedIngestReport> {
+    storage::migrate_postgres(&input.postgres_url)?;
+    if let Some(manifest) = &input.manifest {
+        let plan = build_indexing_plan(manifest)?;
+        let sources = plan
+            .sources
+            .iter()
+            .filter(|source| !source.template && source.address.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        storage::register_feed_source_subscriptions(
+            &input.postgres_url,
+            &input.deployment,
+            input.chain_id,
+            &sources,
+        )?;
+    }
+
+    let rpc_url = resolve_primary_rpc_url(input.chain_id, input.rpc_url)?;
+    let to_block = match input.to_block {
+        Some(to_block) => to_block,
+        None => latest_block_number(&rpc_url)?,
+    };
+    let to_block_hash = fetch_block_hash(&rpc_url, to_block)?;
+    let subscriptions = storage::list_feed_subscriptions(&input.postgres_url, input.chain_id)?;
+    let mut inserted_logs = 0_u64;
+    for subscription in &subscriptions {
+        let from_block = subscription
+            .cursor_block
+            .map(|block| block.saturating_add(1))
+            .unwrap_or_else(|| input.from_block.unwrap_or(subscription.from_block));
+        let from_block = from_block.max(subscription.from_block);
+        if from_block > to_block {
+            continue;
+        }
+        let logs = scan_raw_logs(
+            &rpc_url,
+            &subscription.address,
+            from_block,
+            to_block,
+            &subscription.topic0s,
+            input.max_block_range,
+            input.rpc_retries,
+        )?;
+        inserted_logs += storage::write_feed_logs(
+            &input.postgres_url,
+            subscription,
+            &logs,
+            to_block,
+            to_block_hash.as_deref(),
+        )?;
+    }
+    Ok(storage::FeedIngestReport {
+        chain_id: input.chain_id,
+        subscriptions: subscriptions.len(),
+        to_block: Some(to_block),
+        inserted_logs,
     })
 }
 
@@ -1436,6 +1943,7 @@ fn run_matrix(input: MatrixInput) -> anyhow::Result<MatrixReport> {
                 build_dir: &input.build_dir,
                 chain_id: input.chain_id,
                 rpc_url: input.rpc_url,
+                log_source: LogSource::Rpc,
                 from_block: input.from_block,
                 to_block: Some(to_block),
                 limit: input.limit,
@@ -1547,6 +2055,7 @@ struct SyncOnceInput<'a> {
     build_dir: &'a std::path::Path,
     chain_id: u64,
     rpc_url: Option<String>,
+    log_source: LogSource,
     from_block: Option<u64>,
     to_block: Option<u64>,
     limit: usize,
@@ -1595,6 +2104,7 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         build_dir: input.build_dir.to_path_buf(),
         chain_id: input.chain_id,
         rpc_url: input.rpc_url,
+        log_source: input.log_source.clone(),
         from_block,
         to_block: input.to_block,
         limit: input.limit,
@@ -1845,6 +2355,21 @@ fn snapshot_store(
             url: postgres_url.context("missing --postgres-url for postgres storage")?,
             deployment,
         }),
+    }
+}
+
+fn log_source_for_sync(kind: LogSourceKind, store: &SnapshotStore) -> anyhow::Result<LogSource> {
+    match kind {
+        LogSourceKind::Rpc => Ok(LogSource::Rpc),
+        LogSourceKind::PostgresFeed => match store {
+            SnapshotStore::Postgres { url, deployment } => Ok(LogSource::PostgresFeed {
+                postgres_url: url.clone(),
+                deployment: deployment.clone(),
+            }),
+            SnapshotStore::Json { .. } => {
+                anyhow::bail!("postgres-feed log source requires postgres storage")
+            }
+        },
     }
 }
 

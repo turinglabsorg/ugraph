@@ -15,6 +15,26 @@ services:
       timeout: 3s
       retries: 20
 
+  chain-reader:
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      UGRAPH_MODE: chain-reader
+      UGRAPH_POSTGRES_URL: postgres://ugraph:ugraph@postgres:5432/ugraph
+      UGRAPH_DEPLOYMENT: growfi
+      UGRAPH_MANIFEST: /app/examples/growfi/subgraph.yaml
+      UGRAPH_RPC_URL: ${UGRAPH_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+      UGRAPH_CHAIN_ID: "11155111"
+      UGRAPH_POLL_INTERVAL_MS: ${UGRAPH_POLL_INTERVAL_MS:-1000}
+      UGRAPH_RETRY_MAX_MS: ${UGRAPH_RETRY_MAX_MS:-60000}
+      UGRAPH_MAX_BLOCK_RANGE: ${UGRAPH_MAX_BLOCK_RANGE:-2000}
+      UGRAPH_RPC_RETRIES: ${UGRAPH_RPC_RETRIES:-3}
+      UGRAPH_FROM_BLOCK: ${UGRAPH_FROM_BLOCK:-10845295}
+      UGRAPH_TO_BLOCK: ${UGRAPH_TO_BLOCK:-}
+
   indexer:
     build:
       context: .
@@ -24,6 +44,7 @@ services:
     environment:
       UGRAPH_MODE: indexer
       UGRAPH_STORAGE: postgres
+      UGRAPH_LOG_SOURCE: ${UGRAPH_LOG_SOURCE:-postgres-feed}
       UGRAPH_POSTGRES_URL: postgres://ugraph:ugraph@postgres:5432/ugraph
       UGRAPH_DEPLOYMENT: growfi
       UGRAPH_MANIFEST: /app/examples/growfi/subgraph.yaml

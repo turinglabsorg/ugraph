@@ -27,12 +27,16 @@ subgraph:
 The intended operator flow is a single CLI command such as:
 
 ```bash
-ugraph deploy --provider gcloud --deployment growfi-v1 --chain-id 11155111 --manifest subgraph.yaml
+ugraph deploy --provider local --deployment growfi-v1 --chain-id 11155111 --manifest subgraph.yaml --postgres-url <postgres-url> --rpc-url <rpc>
 ```
 
 That command should create or reuse the shared infrastructure, ensure readers
 exist for the required chains, register the deployment, run sync, and expose
 GraphQL/GraphiQL.
+
+The current implementation supports the local version of that flow. The same
+Docker image can run as `serve`, `indexer`, or `chain-reader`; `docker compose`
+starts Postgres, the shared reader, the feed-backed indexer, and the API.
 
 ## Core
 

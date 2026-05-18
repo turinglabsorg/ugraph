@@ -38,6 +38,11 @@ multiple chains.
 docker compose -f infra/docker-compose.yml up -d postgres
 ```
 
+The implemented local core compose lives in `core/docker-compose.yml` and
+starts Postgres, `chain-reader`, `indexer`, and `api`. The indexer uses
+`UGRAPH_LOG_SOURCE=postgres-feed` by default there, while direct RPC sync
+remains available with `UGRAPH_LOG_SOURCE=rpc`.
+
 ## CLI Image
 
 ```bash
@@ -45,7 +50,7 @@ docker build -f infra/Dockerfile -t ugraph-core .
 docker run --rm ugraph-core --help
 ```
 
-The same image shape can be promoted to Cloud Run once the query/API service is
-implemented.
+The same image shape can be promoted to managed container hosts once provider
+automation is implemented.
 
 The builder image uses Rust 1.88+ because Wasmtime 38 requires it.

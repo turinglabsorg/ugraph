@@ -29,8 +29,8 @@ pub use rpc::{
     RpcResolution, RpcResolverError, RpcResolverOptions,
 };
 pub use scan::{
-    scan_planned_source, scan_static_sources, MatchedLog, ScanError, ScanOptions, ScanReport,
-    ScanSourceReport,
+    latest_block_number, parse_rpc_u64, scan_planned_source, scan_raw_logs, scan_static_sources,
+    MatchedLog, RawEthereumLog, ScanError, ScanOptions, ScanReport, ScanSourceReport,
 };
 pub use schema::{parse_entity_schema, EntityField, EntitySchema, EntityType, SchemaError};
 pub use wasm::{

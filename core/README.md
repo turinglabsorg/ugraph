@@ -41,6 +41,9 @@ cargo run -p ugraph -- compare --state-file .ugraph/state.json --endpoint <hoste
 cargo run -p ugraph -- conformance --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
 cargo run -p ugraph -- matrix --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --to-block 10846000 --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
 cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --rpc-url <rpc>
+cargo run -p ugraph -- chain-reader --manifest examples/growfi/subgraph.yaml --postgres-url <postgres-url> --deployment growfi --chain-id 11155111 --rpc-url <rpc> --watch
+cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --log-source postgres-feed --chain-id 11155111 --rpc-url <rpc>
+cargo run -p ugraph -- deploy --provider local --manifest examples/growfi/subgraph.yaml --storage postgres --postgres-url <postgres-url> --deployment growfi --chain-id 11155111 --rpc-url <rpc>
 cargo run -p ugraph -- serve --storage postgres --deployment growfi --postgres-url <postgres-url> --port 8030
 cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml
 docker build -t ugraph-core:local .
@@ -58,6 +61,7 @@ UGRAPH_STATE_FILE=.ugraph/state.json
 UGRAPH_STORAGE=json
 UGRAPH_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres
 UGRAPH_DEPLOYMENT=default
+UGRAPH_LOG_SOURCE=rpc
 UGRAPH_POLL_INTERVAL_MS=1000
 UGRAPH_RETRY_MAX_MS=60000
 UGRAPH_REORG_POLICY=rollback
@@ -80,7 +84,12 @@ The image uses the same binary for the API and indexer:
 - `UGRAPH_MODE=serve` exposes `/graphql`, `/`, `/status`, `/healthz`, and
   `/metrics`.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
+- `UGRAPH_MODE=chain-reader` reads one `chain_id` from RPC and writes raw logs
+  into Postgres for every registered subscription on that chain.
 - `UGRAPH_STORAGE=postgres` should be used for shared API/indexer deployments.
+- `UGRAPH_LOG_SOURCE=rpc|postgres-feed` controls whether `sync` reads logs
+  directly from RPC or from the shared Postgres raw feed. The default remains
+  RPC for direct compatibility; local deployment uses `postgres-feed`.
 - `UGRAPH_REORG_POLICY=fail|rollback|reset` controls what happens when the
   stored checkpoint hash no longer matches the RPC. `rollback` rewinds to the
   newest retained matching checkpoint.
@@ -96,9 +105,10 @@ The image uses the same binary for the API and indexer:
 - `UGRAPH_IPFS_TIMEOUT_SECS` and `UGRAPH_MAX_IPFS_FILE_BYTES` bound IPFS
   gateway calls.
 
-`docker-compose.yml` starts Postgres, an indexer worker, and the API locally.
-The API reloads the selected store on each GraphQL request, so writes committed
-by the indexer are visible without restarting the server.
+`docker-compose.yml` starts Postgres, a shared `chain-reader`, a feed-backed
+indexer worker, and the API locally. The API reloads the selected store on each
+GraphQL request, so writes committed by the indexer are visible without
+restarting the server.
 
 Production should evolve toward a shared chain feed. Instead of every subgraph
 deployment calling `eth_getLogs` for the same chain, one `chain-reader` per
@@ -108,6 +118,11 @@ under their own `UGRAPH_DEPLOYMENT` ids. A deployment can subscribe to multiple
 `chain_id` values, with chain-scoped cursors and raw feed data. This keeps
 multi-subgraph deployments cheap without turning the runtime into one heavy
 multi-subgraph process.
+
+`ugraph deploy --provider local` currently registers static subscriptions,
+runs a bounded chain-reader pass when `--log-source postgres-feed` is selected,
+syncs the deployment, and leaves the API available through the normal `serve`
+command.
 
 ## Current Scope
 
@@ -120,6 +135,8 @@ The first milestone is compatibility plumbing:
 - Validate `store.set` entity payloads against `schema.graphql`.
 - Persist current-state snapshots with checkpoint metadata through `sync`.
 - Persist current-state deployments to Postgres through `--storage postgres`.
+- Persist shared raw chain feed tables for subscriptions, raw blocks, and raw
+  logs keyed by `chain_id`.
 - Persist retained historical entity versions as compact delta rows with
   tombstones for removals.
 - Run continuous current-state indexing with `sync --watch`.
@@ -134,7 +151,7 @@ The first milestone is compatibility plumbing:
 - Run `matrix` as the repeatable compatibility gate. It emits one report that
   combines structural `doctor`, optional bounded sync, and optional hosted
   GraphQL conformance.
-- Keep the CLI surface ready for deploy commands.
+- Run local deploys through `ugraph deploy --provider local`.
 - Run compatibility checks against large public subgraphs. The current Uniswap
   v3 mainnet stress fixture builds from the official `Uniswap/v3-subgraph` and
   passes `doctor`, `compat`, handler export, and handler signature checks with

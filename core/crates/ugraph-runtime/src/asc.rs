@@ -2328,7 +2328,7 @@ fn fixed_bytes_size(kind: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use std::{
-        io::{Read, Write},
+        io::{ErrorKind, Read, Write},
         net::TcpListener,
         thread,
     };
@@ -2499,8 +2499,11 @@ mod tests {
 
     #[test]
     fn fetches_ipfs_bytes_from_direct_url() -> Result<(), wasmtime::Error> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+            Err(err) => return Err(wasmtime::Error::msg(err.to_string())),
+        };
         let address = listener
             .local_addr()
             .map_err(|err| wasmtime::Error::msg(err.to_string()))?;

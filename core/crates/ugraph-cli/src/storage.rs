@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::Context;
 use postgres::{Client, NoTls};
 use serde_json::Value;
-use ugraph_core::EntitySchema;
+use ugraph_core::{
+    decode_event_params, parse_rpc_u64, EntitySchema, RawEthereumLog, ScanSourceReport, SourcePlan,
+};
 use ugraph_runtime::EntityData;
 
 use crate::state::{
@@ -20,6 +22,26 @@ pub enum SnapshotStore {
 pub struct IndexerLock {
     client: Option<Client>,
     key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FeedSubscription {
+    pub chain_id: u64,
+    pub deployment: String,
+    pub source: String,
+    pub template: bool,
+    pub address: String,
+    pub from_block: u64,
+    pub cursor_block: Option<u64>,
+    pub topic0s: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FeedIngestReport {
+    pub chain_id: u64,
+    pub subscriptions: usize,
+    pub to_block: Option<u64>,
+    pub inserted_logs: u64,
 }
 
 impl SnapshotStore {
@@ -519,6 +541,431 @@ fn write_postgres_history(
     Ok(())
 }
 
+pub fn migrate_postgres(url: &str) -> anyhow::Result<()> {
+    let mut client = connect(url)?;
+    migrate(&mut client)
+}
+
+pub fn register_feed_source_subscription(
+    url: &str,
+    deployment: &str,
+    chain_id: u64,
+    source: &SourcePlan,
+) -> anyhow::Result<bool> {
+    let Some(address) = source
+        .address
+        .as_deref()
+        .filter(|address| !address.is_empty())
+    else {
+        return Ok(false);
+    };
+    if source.triggers.is_empty() {
+        return Ok(false);
+    }
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    register_feed_source_subscription_with_client(
+        &mut client,
+        deployment,
+        chain_id,
+        source,
+        address,
+    )
+}
+
+pub fn register_feed_source_subscriptions(
+    url: &str,
+    deployment: &str,
+    chain_id: u64,
+    sources: &[SourcePlan],
+) -> anyhow::Result<usize> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let mut count = 0;
+    for source in sources {
+        let Some(address) = source
+            .address
+            .as_deref()
+            .filter(|address| !address.is_empty())
+        else {
+            continue;
+        };
+        if source.triggers.is_empty() {
+            continue;
+        }
+        if register_feed_source_subscription_with_client(
+            &mut client,
+            deployment,
+            chain_id,
+            source,
+            address,
+        )? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn register_feed_source_subscription_with_client(
+    client: &mut Client,
+    deployment: &str,
+    chain_id: u64,
+    source: &SourcePlan,
+    address: &str,
+) -> anyhow::Result<bool> {
+    let chain_id = i64::try_from(chain_id).context("chain id overflows postgres")?;
+    let from_block = i64::try_from(source.start_block.unwrap_or(0))
+        .context("subscription start block overflows postgres")?;
+    let topic0s = source
+        .triggers
+        .iter()
+        .map(|trigger| trigger.topic0.to_lowercase())
+        .collect::<Vec<_>>();
+    let topic0s_json = serde_json::to_value(&topic0s)?;
+    let address = address.to_lowercase();
+    let template = source.dynamic;
+    let inserted = client.execute(
+        r#"
+        insert into ugraph_feed_subscriptions (
+          chain_id, deployment, source, template, address, from_block, topic0s,
+          active, updated_at
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, true, now())
+        on conflict (chain_id, deployment, source, template, address, from_block)
+        do update set
+          topic0s = excluded.topic0s,
+          active = true,
+          updated_at = now()
+        "#,
+        &[
+            &chain_id,
+            &deployment,
+            &source.name,
+            &template,
+            &address,
+            &from_block,
+            &topic0s_json,
+        ],
+    )?;
+    Ok(inserted > 0)
+}
+
+pub fn list_feed_subscriptions(url: &str, chain_id: u64) -> anyhow::Result<Vec<FeedSubscription>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let chain_id_i64 = i64::try_from(chain_id).context("chain id overflows postgres")?;
+    client
+        .query(
+            r#"
+            select chain_id, deployment, source, template, address, from_block,
+              cursor_block, topic0s
+            from ugraph_feed_subscriptions
+            where chain_id = $1 and active = true
+            order by deployment, source, address, from_block
+            "#,
+            &[&chain_id_i64],
+        )?
+        .into_iter()
+        .map(row_to_feed_subscription)
+        .collect()
+}
+
+fn row_to_feed_subscription(row: postgres::Row) -> anyhow::Result<FeedSubscription> {
+    let chain_id: i64 = row.get("chain_id");
+    let from_block: i64 = row.get("from_block");
+    let cursor_block: Option<i64> = row.get("cursor_block");
+    let topic0s_value: Value = row.get("topic0s");
+    Ok(FeedSubscription {
+        chain_id: u64::try_from(chain_id).context("subscription chain id is negative")?,
+        deployment: row.get("deployment"),
+        source: row.get("source"),
+        template: row.get("template"),
+        address: row.get("address"),
+        from_block: u64::try_from(from_block).context("subscription from block is negative")?,
+        cursor_block: cursor_block
+            .map(|block| u64::try_from(block).context("subscription cursor block is negative"))
+            .transpose()?,
+        topic0s: serde_json::from_value(topic0s_value).context("decoding subscription topic0s")?,
+    })
+}
+
+pub fn write_feed_logs(
+    url: &str,
+    subscription: &FeedSubscription,
+    logs: &[RawEthereumLog],
+    to_block: u64,
+    to_block_hash: Option<&str>,
+) -> anyhow::Result<u64> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let mut tx = client.transaction()?;
+    let chain_id = i64::try_from(subscription.chain_id).context("chain id overflows postgres")?;
+    let mut inserted = 0_u64;
+    for log in logs {
+        let Some(block_number) = log.block_number.as_deref().and_then(parse_rpc_u64) else {
+            continue;
+        };
+        let Some(transaction_index) = log.transaction_index.as_deref().and_then(parse_rpc_u64)
+        else {
+            continue;
+        };
+        let Some(log_index) = log.log_index.as_deref().and_then(parse_rpc_u64) else {
+            continue;
+        };
+        let Some(topic0) = log.topics.first() else {
+            continue;
+        };
+        let block_number = i64::try_from(block_number).context("log block overflows postgres")?;
+        let transaction_index =
+            i64::try_from(transaction_index).context("log tx index overflows postgres")?;
+        let log_index = i64::try_from(log_index).context("log index overflows postgres")?;
+        let address = log.address.to_lowercase();
+        let topic0 = topic0.to_lowercase();
+        let topics = serde_json::to_value(&log.topics)?;
+        inserted += tx.execute(
+            r#"
+            insert into ugraph_raw_logs (
+              chain_id, block_number, block_hash, transaction_hash,
+              transaction_index, log_index, address, topic0, topics, data
+            )
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            on conflict (chain_id, block_number, transaction_index, log_index)
+            do nothing
+            "#,
+            &[
+                &chain_id,
+                &block_number,
+                &log.block_hash,
+                &log.transaction_hash,
+                &transaction_index,
+                &log_index,
+                &address,
+                &topic0,
+                &topics,
+                &log.data,
+            ],
+        )?;
+    }
+    let to_block_i64 = i64::try_from(to_block).context("cursor block overflows postgres")?;
+    tx.execute(
+        r#"
+        insert into ugraph_raw_blocks (chain_id, block_number, block_hash, updated_at)
+        values ($1, $2, $3, now())
+        on conflict (chain_id, block_number) do update set
+          block_hash = excluded.block_hash,
+          updated_at = now()
+        "#,
+        &[&chain_id, &to_block_i64, &to_block_hash],
+    )?;
+    let from_block = i64::try_from(subscription.from_block)
+        .context("subscription from block overflows postgres")?;
+    tx.execute(
+        r#"
+        update ugraph_feed_subscriptions
+        set cursor_block = $1, cursor_hash = $2, updated_at = now()
+        where chain_id = $3
+          and deployment = $4
+          and source = $5
+          and template = $6
+          and address = $7
+          and from_block = $8
+        "#,
+        &[
+            &to_block_i64,
+            &to_block_hash,
+            &chain_id,
+            &subscription.deployment,
+            &subscription.source,
+            &subscription.template,
+            &subscription.address,
+            &from_block,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+pub fn latest_feed_block(url: &str, chain_id: u64) -> anyhow::Result<Option<u64>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let chain_id = i64::try_from(chain_id).context("chain id overflows postgres")?;
+    let row = client.query_one(
+        "select max(cursor_block) as block from ugraph_feed_subscriptions where chain_id = $1",
+        &[&chain_id],
+    )?;
+    let block: Option<i64> = row.get("block");
+    block
+        .map(|block| u64::try_from(block).context("feed cursor block is negative"))
+        .transpose()
+}
+
+pub fn feed_block_hash(
+    url: &str,
+    chain_id: u64,
+    block_number: u64,
+) -> anyhow::Result<Option<String>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let chain_id = i64::try_from(chain_id).context("chain id overflows postgres")?;
+    let block_number = i64::try_from(block_number).context("block number overflows postgres")?;
+    let row = client.query_opt(
+        "select block_hash from ugraph_raw_blocks where chain_id = $1 and block_number = $2",
+        &[&chain_id, &block_number],
+    )?;
+    Ok(row.and_then(|row| row.get("block_hash")))
+}
+
+pub fn feed_source_caught_up(
+    url: &str,
+    deployment: &str,
+    chain_id: u64,
+    source: &SourcePlan,
+    to_block: u64,
+) -> anyhow::Result<bool> {
+    let Some(address) = source
+        .address
+        .as_deref()
+        .filter(|address| !address.is_empty())
+    else {
+        return Ok(true);
+    };
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let chain_id = i64::try_from(chain_id).context("chain id overflows postgres")?;
+    let from_block = i64::try_from(source.start_block.unwrap_or(0))
+        .context("subscription start block overflows postgres")?;
+    let to_block = i64::try_from(to_block).context("to block overflows postgres")?;
+    let row = client.query_opt(
+        r#"
+        select cursor_block
+        from ugraph_feed_subscriptions
+        where chain_id = $1
+          and deployment = $2
+          and source = $3
+          and template = $4
+          and address = $5
+          and from_block = $6
+        "#,
+        &[
+            &chain_id,
+            &deployment,
+            &source.name,
+            &source.dynamic,
+            &address.to_lowercase(),
+            &from_block,
+        ],
+    )?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let cursor_block: Option<i64> = row.get("cursor_block");
+    Ok(cursor_block.is_some_and(|cursor| cursor >= to_block))
+}
+
+pub fn load_feed_source_report(
+    url: &str,
+    chain_id: u64,
+    source: &SourcePlan,
+    from_block: Option<u64>,
+    to_block: u64,
+) -> anyhow::Result<ScanSourceReport> {
+    let address = source.address.clone().unwrap_or_default();
+    let source_from_block = source.start_block.unwrap_or(0);
+    let from_block = from_block
+        .map(|block| block.max(source_from_block))
+        .unwrap_or(source_from_block);
+    if address.is_empty() || from_block > to_block {
+        return Ok(ScanSourceReport {
+            name: source.name.clone(),
+            address,
+            from_block,
+            to_block,
+            skipped: true,
+            trigger_count: source.triggers.len(),
+            log_count: 0,
+            logs: Vec::new(),
+        });
+    }
+
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let chain_id_i64 = i64::try_from(chain_id).context("chain id overflows postgres")?;
+    let from_block_i64 = i64::try_from(from_block).context("from block overflows postgres")?;
+    let to_block_i64 = i64::try_from(to_block).context("to block overflows postgres")?;
+    let topic0s = source
+        .triggers
+        .iter()
+        .map(|trigger| trigger.topic0.to_lowercase())
+        .collect::<Vec<_>>();
+    let trigger_by_topic = source
+        .triggers
+        .iter()
+        .map(|trigger| (trigger.topic0.to_lowercase(), trigger))
+        .collect::<BTreeMap<_, _>>();
+    let mut logs = Vec::new();
+    for row in client.query(
+        r#"
+        select block_number, block_hash, transaction_hash, transaction_index,
+          log_index, address, topic0, topics, data
+        from ugraph_raw_logs
+        where chain_id = $1
+          and address = $2
+          and topic0 = any($3)
+          and block_number between $4 and $5
+        order by block_number, transaction_index, log_index
+        "#,
+        &[
+            &chain_id_i64,
+            &address.to_lowercase(),
+            &topic0s,
+            &from_block_i64,
+            &to_block_i64,
+        ],
+    )? {
+        let topic0: String = row.get("topic0");
+        let Some(trigger) = trigger_by_topic.get(&topic0) else {
+            continue;
+        };
+        let topics_value: Value = row.get("topics");
+        let topics: Vec<String> =
+            serde_json::from_value(topics_value).context("decoding raw log topics")?;
+        let data: String = row.get("data");
+        let block_number: i64 = row.get("block_number");
+        let transaction_index: i64 = row.get("transaction_index");
+        let log_index: i64 = row.get("log_index");
+        logs.push(ugraph_core::MatchedLog {
+            source: source.name.clone(),
+            template: source.dynamic,
+            handler: trigger.handler.clone(),
+            signature: trigger.signature.clone(),
+            network: source.network.clone(),
+            topic0,
+            address: row.get("address"),
+            block_number: Some(u64::try_from(block_number).context("raw log block is negative")?),
+            block_hash: row.get("block_hash"),
+            transaction_hash: row.get("transaction_hash"),
+            transaction_index: Some(
+                u64::try_from(transaction_index).context("raw log tx index is negative")?,
+            ),
+            log_index: Some(u64::try_from(log_index).context("raw log index is negative")?),
+            params: decode_event_params(&trigger.inputs, &topics, &data)
+                .context("decoding raw feed log")?,
+            topics,
+            data,
+        });
+    }
+    Ok(ScanSourceReport {
+        name: source.name.clone(),
+        address,
+        from_block,
+        to_block,
+        skipped: false,
+        trigger_count: source.triggers.len(),
+        log_count: logs.len(),
+        logs,
+    })
+}
+
 const POSTGRES_SCHEMA: &str = r#"
 create table if not exists ugraph_deployments (
   id text primary key,
@@ -619,6 +1066,50 @@ create index if not exists ugraph_entity_versions_entity_id
 
 create index if not exists ugraph_entity_versions_data_gin
   on ugraph_entity_versions using gin (data);
+
+create table if not exists ugraph_feed_subscriptions (
+  chain_id bigint not null,
+  deployment text not null,
+  source text not null,
+  template boolean not null,
+  address text not null,
+  from_block bigint not null,
+  topic0s jsonb not null,
+  cursor_block bigint,
+  cursor_hash text,
+  active boolean not null default true,
+  updated_at timestamptz not null default now(),
+  primary key (chain_id, deployment, source, template, address, from_block)
+);
+
+create index if not exists ugraph_feed_subscriptions_due
+  on ugraph_feed_subscriptions (chain_id, active, cursor_block);
+
+create table if not exists ugraph_raw_blocks (
+  chain_id bigint not null,
+  block_number bigint not null,
+  block_hash text,
+  updated_at timestamptz not null default now(),
+  primary key (chain_id, block_number)
+);
+
+create table if not exists ugraph_raw_logs (
+  chain_id bigint not null,
+  block_number bigint not null,
+  block_hash text,
+  transaction_hash text,
+  transaction_index bigint not null,
+  log_index bigint not null,
+  address text not null,
+  topic0 text not null,
+  topics jsonb not null,
+  data text not null,
+  inserted_at timestamptz not null default now(),
+  primary key (chain_id, block_number, transaction_index, log_index)
+);
+
+create index if not exists ugraph_raw_logs_lookup
+  on ugraph_raw_logs (chain_id, address, topic0, block_number, transaction_index, log_index);
 "#;
 
 #[cfg(test)]
@@ -639,6 +1130,9 @@ mod tests {
             "ugraph_processed_logs",
             "ugraph_history_snapshots",
             "ugraph_entity_versions",
+            "ugraph_feed_subscriptions",
+            "ugraph_raw_blocks",
+            "ugraph_raw_logs",
         ] {
             assert!(POSTGRES_SCHEMA.contains(table));
         }

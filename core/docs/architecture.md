@@ -73,11 +73,24 @@ Kafka, Pub/Sub, Redis, or another queue. Later, the same boundary can be backed
 by a streaming system if throughput requires it. The contract between reader
 and sync jobs is raw chain data, not decoded entity changes.
 
+Implemented feed tables:
+
+- `ugraph_feed_subscriptions` stores deployment/source/address/topic
+  subscriptions and a cursor per `chain_id`.
+- `ugraph_raw_blocks` stores observed block hashes per `chain_id`.
+- `ugraph_raw_logs` stores raw logs keyed by `chain_id`, block, transaction
+  index, and log index.
+
+`ugraph chain-reader` reads all active subscriptions for one `chain_id` and
+writes raw logs into those tables. `ugraph sync --log-source postgres-feed`
+loads matching logs from Postgres instead of calling `eth_getLogs`. The direct
+RPC path remains available through `--log-source rpc`.
+
 Target CLI flow:
 
 ```bash
 ugraph deploy \
-  --provider gcloud \
+  --provider local \
   --deployment growfi-v1 \
   --chain-id 11155111 \
   --manifest subgraph.yaml \

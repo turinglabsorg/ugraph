@@ -20,6 +20,9 @@ cargo run -p ugraph -- compare --state-file .ugraph/state.json --endpoint <hoste
 cargo run -p ugraph -- conformance --state-file .ugraph/state.json --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
 cargo run -p ugraph -- matrix --manifest examples/growfi/subgraph.yaml --rpc-url <rpc> --to-block <n> --endpoint <hosted-graphql-url> --cases-file examples/growfi/conformance.json
 cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment <id> --postgres-url <url> --rpc-url <rpc> --from-block <n> --to-block <n>
+cargo run -p ugraph -- chain-reader --manifest examples/growfi/subgraph.yaml --postgres-url <url> --deployment <id> --chain-id 11155111 --rpc-url <rpc> --watch
+cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment <id> --postgres-url <url> --log-source postgres-feed --chain-id 11155111 --rpc-url <rpc> --from-block <n> --to-block <n>
+cargo run -p ugraph -- deploy --provider local --manifest examples/growfi/subgraph.yaml --storage postgres --postgres-url <url> --deployment <id> --chain-id 11155111 --rpc-url <rpc>
 cargo run -p ugraph -- serve --storage postgres --deployment <id> --postgres-url <url> --port 8030
 docker build -t ugraph-core:local .
 docker compose up --build
@@ -100,6 +103,15 @@ docker compose up --build
   entities, dynamic source instances, processed-log cursors, historical
   checkpoints, and compact entity-version deltas in normalized tables, then
   reconstructs the same `StoreSnapshot` used by the query engine.
+- Postgres also stores the shared raw chain feed: feed subscriptions, raw
+  blocks, and raw logs keyed by `chain_id`. `sync --log-source postgres-feed`
+  consumes the feed, while `sync --log-source rpc` keeps the direct RPC path.
+- `chain-reader` owns RPC polling for one `chain_id` and writes raw logs for
+  all registered subscriptions on that chain. Passing a manifest registers its
+  static data source subscriptions.
+- `deploy --provider local` registers feed subscriptions, runs a bounded
+  chain-reader pass for `postgres-feed`, syncs the deployment, and reports
+  feed/sync status.
 - `serve` reloads the selected store on each GraphQL/health request so API
   containers see Postgres writes from indexer containers without restart.
 - `serve` exposes `/graphql` plus GraphiQL.
@@ -195,8 +207,11 @@ The single Docker image is mode-driven:
 
 - `UGRAPH_MODE=serve` runs the GraphQL API.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
-- `docker-compose.yml` starts Postgres, API, and indexer for local production
-  smoke tests.
+- `UGRAPH_MODE=chain-reader` runs the shared raw feed reader.
+- `UGRAPH_LOG_SOURCE=rpc|postgres-feed` chooses direct RPC sync or local feed
+  sync.
+- `docker-compose.yml` starts Postgres, chain-reader, feed-backed indexer, and
+  API for local production smoke tests.
 - `UGRAPH_REORG_POLICY=fail|rollback|reset` controls checkpoint hash mismatch
   behavior. `rollback` probes retained checkpoints and rewinds to the newest
   matching block.

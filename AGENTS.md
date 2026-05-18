@@ -90,8 +90,17 @@
   structural `doctor`, optional bounded sync when `--to-block` is provided, and
   optional GraphQL conformance when both `--endpoint` and `--cases-file` are
   provided. Use it for fixture reports instead of ad hoc command bundles.
-- `core` has a single Docker image controlled by `UGRAPH_MODE=serve|indexer`
-  and a local `docker-compose.yml` with Postgres, API, and indexer.
+- `core` has a single Docker image controlled by
+  `UGRAPH_MODE=serve|indexer|chain-reader` and a local `docker-compose.yml`
+  with Postgres, a shared chain reader, a feed-backed indexer, and API.
+- `core chain-reader` registers static manifest subscriptions when a manifest
+  is provided, reads raw logs for one `chain_id`, and writes them into
+  Postgres feed tables. `core sync --log-source postgres-feed` consumes that
+  feed instead of calling `eth_getLogs` directly. Direct RPC sync remains
+  available with `--log-source rpc`.
+- `core deploy --provider local` registers feed subscriptions, runs a bounded
+  chain-reader pass when using `postgres-feed`, syncs the deployment, and
+  reports feed/sync status.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`
@@ -146,6 +155,8 @@
 - Current implementation has transactional Postgres current-state storage,
   retained compact history tables, advisory indexer locking, and checkpoint
   rollback for reorgs.
+- Current implementation also has shared feed tables for subscriptions, raw
+  blocks, and raw logs keyed by `chain_id`.
 - Live Sepolia buy smoke passed: tx
   `0x0ce83b9006ae4a7ce985505f6eee0e52b54d9ed07a0f0c4d76bee95bb1df3c25`,
   block `10866837`, 4 logs executed, 0 validation errors, local GraphQL matched

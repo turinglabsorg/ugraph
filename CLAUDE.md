@@ -14,5 +14,11 @@
 - The intended operator flow is `ugraph deploy ...`: create or reuse shared
   infrastructure, ensure required chain readers exist, register subscriptions,
   run sync, and expose GraphQL/GraphiQL.
+- Implemented local flow: `ugraph deploy --provider local` can register feed
+  subscriptions, run a bounded `chain-reader` pass, and sync a deployment from
+  `UGRAPH_LOG_SOURCE=postgres-feed`.
+- Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also
+  forwards normal `ugraph` subcommands such as `deploy`, `chain-reader`, and
+  `--help`.
 - Keep provider wiring out of the core runtime. DigitalOcean is a likely target,
   but the core container should stay portable.

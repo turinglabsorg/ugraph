@@ -74,17 +74,17 @@ pub struct MatchedLog {
     pub params: Vec<DecodedEventParam>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EthLog {
-    address: String,
-    topics: Vec<String>,
-    data: String,
-    block_number: Option<String>,
-    block_hash: Option<String>,
-    transaction_hash: Option<String>,
-    transaction_index: Option<String>,
-    log_index: Option<String>,
+pub struct RawEthereumLog {
+    pub address: String,
+    pub topics: Vec<String>,
+    pub data: String,
+    pub block_number: Option<String>,
+    pub block_hash: Option<String>,
+    pub transaction_hash: Option<String>,
+    pub transaction_index: Option<String>,
+    pub log_index: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +250,37 @@ fn scan_source_range(
     })
 }
 
+pub fn latest_block_number(rpc_url: &str) -> Result<u64, ScanError> {
+    let client = rpc_client()?;
+    eth_block_number(&client, rpc_url)
+}
+
+pub fn scan_raw_logs(
+    rpc_url: &str,
+    address: &str,
+    from_block: u64,
+    to_block: u64,
+    topic0s: &[String],
+    max_block_range: u64,
+    rpc_retries: u32,
+) -> Result<Vec<RawEthereumLog>, ScanError> {
+    let client = rpc_client()?;
+    eth_get_logs_chunked(LogScanRequest {
+        client: &client,
+        rpc_url,
+        address,
+        from_block,
+        to_block,
+        topic0s,
+        max_block_range,
+        rpc_retries,
+    })
+}
+
+pub fn parse_rpc_u64(value: &str) -> Option<u64> {
+    parse_hex_u64(value)
+}
+
 fn eth_block_number(client: &Client, rpc_url: &str) -> Result<u64, ScanError> {
     let block = rpc::<String>(client, rpc_url, "eth_blockNumber", json!([]))?;
     parse_hex_u64(&block).ok_or(ScanError::MissingResult)
@@ -266,7 +297,7 @@ struct LogScanRequest<'a> {
     rpc_retries: u32,
 }
 
-fn eth_get_logs_chunked(request: LogScanRequest<'_>) -> Result<Vec<EthLog>, ScanError> {
+fn eth_get_logs_chunked(request: LogScanRequest<'_>) -> Result<Vec<RawEthereumLog>, ScanError> {
     if request.topic0s.is_empty() || request.from_block > request.to_block {
         return Ok(Vec::new());
     }
@@ -296,7 +327,7 @@ fn eth_get_logs_resilient(
     to_block: u64,
     topic0s: &[String],
     rpc_retries: u32,
-) -> Result<Vec<EthLog>, ScanError> {
+) -> Result<Vec<RawEthereumLog>, ScanError> {
     match rpc_with_retries(
         client,
         rpc_url,
