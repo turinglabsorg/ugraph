@@ -119,7 +119,11 @@ docker compose up --build
   checkpoint is complete.
 - `serve` reloads the selected store on each GraphQL/health request so API
   containers see Postgres writes from indexer containers without restart.
-- `serve` exposes `/graphql` plus GraphiQL.
+- `serve` exposes `/graphql` plus GraphiQL. `/` and `/status` render the public
+  brutalist status page. The sync log is paginated by `sync_page`/`sync_limit`,
+  hides empty blocks by default, supports `show_empty=1`, and links block rows
+  to the configured explorer through `UGRAPH_CHAIN_ID` or
+  `UGRAPH_BLOCK_EXPLORER_URL`.
   Current query support covers POST/GET `/graphql`, CORS preflight,
   `operationName`, variables, `_meta.block.number`, `hasIndexingErrors`,
   entity lookup by ID, plural entity lists, `where`, nested direct relations,

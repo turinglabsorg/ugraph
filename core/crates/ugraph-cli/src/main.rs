@@ -456,6 +456,10 @@ enum Command {
         postgres_url: Option<String>,
         #[arg(long, env = "UGRAPH_DEPLOYMENT", default_value = "default")]
         deployment: String,
+        #[arg(long, env = "UGRAPH_CHAIN_ID")]
+        chain_id: Option<u64>,
+        #[arg(long, env = "UGRAPH_BLOCK_EXPLORER_URL")]
+        block_explorer_url: Option<String>,
         #[arg(long, env = "UGRAPH_HOST", default_value = "127.0.0.1")]
         host: String,
         #[arg(long, env = "UGRAPH_PORT", default_value_t = 8030)]
@@ -753,6 +757,7 @@ struct ReplayRun {
     processed_logs: BTreeSet<LogIdentity>,
     complete: bool,
     block_hash: Option<String>,
+    block_timestamp: Option<u64>,
     history: Vec<HistoricalSnapshot>,
 }
 
@@ -1599,12 +1604,22 @@ fn main() -> anyhow::Result<()> {
             storage,
             postgres_url,
             deployment,
+            chain_id,
+            block_explorer_url,
             host,
             port,
             once,
         } => {
             let store = snapshot_store(storage, state_file, postgres_url, deployment)?;
-            server::serve_store(store, &format!("{host}:{port}"), once)?;
+            server::serve_store(
+                store,
+                &format!("{host}:{port}"),
+                once,
+                server::ServeOptions {
+                    chain_id,
+                    block_explorer_url,
+                },
+            )?;
         }
         Command::Compare {
             state_file,
@@ -1974,6 +1989,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
     let mut history = Vec::new();
     let mut ethereum_call_cache = ugraph_runtime::EthereumCallCache::new();
     let mut runtime_cache = ugraph_runtime::RuntimeModuleCache::new();
+    let mut block_metadata_cache = BTreeMap::<u64, BlockMetadata>::new();
 
     for known in &input.known_dynamic_sources {
         let Some(source) =
@@ -2094,13 +2110,17 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
             if has_unprocessed_log_in_block(&pending_logs, &processed_logs, block_number) {
                 continue;
             }
+            let block_metadata =
+                cached_block_metadata(&mut block_metadata_cache, &scan.rpc_url, block_number)
+                    .unwrap_or_default();
             push_history_snapshot(
                 &mut history,
                 historical_snapshot_from_store(
                     SyncCheckpoint {
                         from_block: scan.from_block,
                         to_block: block_number,
-                        block_hash: log.block_hash.clone(),
+                        block_hash: log.block_hash.clone().or(block_metadata.hash),
+                        block_timestamp: block_metadata.timestamp,
                         scanned_logs: pending_logs.len(),
                         executed_logs: executions.len(),
                         validation_errors,
@@ -2118,16 +2138,20 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
             .iter()
             .all(|log| processed_logs.contains(&log_identity(log)));
 
-    let block_hash = match &input.log_source {
-        LogSource::Rpc => fetch_block_hash(&scan.rpc_url, scan.to_block)
-            .ok()
-            .flatten(),
-        LogSource::PostgresFeed { postgres_url, .. } => {
-            storage::feed_block_hash(postgres_url, input.chain_id, scan.to_block)
-                .ok()
-                .flatten()
-        }
-    };
+    let current_block_metadata =
+        cached_block_metadata(&mut block_metadata_cache, &scan.rpc_url, scan.to_block)
+            .unwrap_or_default();
+    let block_hash = current_block_metadata
+        .hash
+        .or_else(|| match &input.log_source {
+            LogSource::Rpc => None,
+            LogSource::PostgresFeed { postgres_url, .. } => {
+                storage::feed_block_hash(postgres_url, input.chain_id, scan.to_block)
+                    .ok()
+                    .flatten()
+            }
+        });
+    let block_timestamp = current_block_metadata.timestamp;
     let report = ReplayReport {
         rpc_url: scan.rpc_url,
         from_block: scan.from_block,
@@ -2147,6 +2171,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         processed_logs,
         complete,
         block_hash,
+        block_timestamp,
         history,
     })
 }
@@ -2593,6 +2618,7 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         from_block: run.report.from_block,
         to_block: run.report.to_block,
         block_hash: run.block_hash.clone(),
+        block_timestamp: run.block_timestamp,
         scanned_logs: run.report.scanned_logs,
         executed_logs: run.report.executed_logs,
         validation_errors: run.report.validation_errors,
@@ -2762,6 +2788,12 @@ struct CheckpointReorgMismatch {
     rpc_url: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct BlockMetadata {
+    hash: Option<String>,
+    timestamp: Option<u64>,
+}
+
 fn checkpoint_reorg_mismatch(
     snapshot: &state::StoreSnapshot,
     chain_id: u64,
@@ -2880,7 +2912,24 @@ fn log_source_for_sync(kind: LogSourceKind, store: &SnapshotStore) -> anyhow::Re
     }
 }
 
+fn cached_block_metadata(
+    cache: &mut BTreeMap<u64, BlockMetadata>,
+    rpc_url: &str,
+    block_number: u64,
+) -> anyhow::Result<BlockMetadata> {
+    if let Some(metadata) = cache.get(&block_number) {
+        return Ok(metadata.clone());
+    }
+    let metadata = fetch_block_metadata(rpc_url, block_number)?;
+    cache.insert(block_number, metadata.clone());
+    Ok(metadata)
+}
+
 fn fetch_block_hash(rpc_url: &str, block_number: u64) -> anyhow::Result<Option<String>> {
+    Ok(fetch_block_metadata(rpc_url, block_number)?.hash)
+}
+
+fn fetch_block_metadata(rpc_url: &str, block_number: u64) -> anyhow::Result<BlockMetadata> {
     let client = reqwest::blocking::Client::builder()
         .timeout(rpc_timeout())
         .build()?;
@@ -2900,13 +2949,18 @@ fn fetch_block_hash(rpc_url: &str, block_number: u64) -> anyhow::Result<Option<S
         .json::<serde_json::Value>()
         .with_context(|| format!("decoding block {block_number} response"))?;
     if response.get("error").is_some() {
-        return Ok(None);
+        return Ok(BlockMetadata::default());
     }
-    Ok(response
-        .get("result")
+    let result = response.get("result");
+    let hash = result
         .and_then(|result| result.get("hash"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string))
+        .map(str::to_string);
+    let timestamp = result
+        .and_then(|result| result.get("timestamp"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(ugraph_core::parse_rpc_u64);
+    Ok(BlockMetadata { hash, timestamp })
 }
 
 fn post_graphql(
@@ -3187,6 +3241,7 @@ mod tests {
                 from_block: Some(1),
                 to_block: 90,
                 block_hash: Some("0xsafe".to_string()),
+                block_timestamp: None,
                 scanned_logs: 10,
                 executed_logs: 10,
                 validation_errors: 0,
@@ -3204,6 +3259,7 @@ mod tests {
                 from_block: Some(1),
                 to_block: 100,
                 block_hash: Some("0xreorged".to_string()),
+                block_timestamp: None,
                 scanned_logs: 11,
                 executed_logs: 11,
                 validation_errors: 0,
@@ -3259,6 +3315,7 @@ mod tests {
                 from_block: Some(1),
                 to_block: 2,
                 block_hash: None,
+                block_timestamp: None,
                 scanned_logs: 0,
                 executed_logs: 0,
                 validation_errors,

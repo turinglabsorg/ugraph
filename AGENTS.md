@@ -93,7 +93,11 @@
   operational homepage, plus `/metrics` in Prometheus text format. The homepage
   should list all public deployment metadata for the instance and the recent
   retained sync blocks for the selected deployment, including
-  created/updated/removed entity deltas per block.
+  created/updated/removed entity deltas per block. Sync blocks are paginated
+  with `sync_page` and `sync_limit`, hide empty blocks by default, and can show
+  empty blocks with `show_empty=1`. When `UGRAPH_CHAIN_ID` or
+  `UGRAPH_BLOCK_EXPLORER_URL` is configured, each block links to the matching
+  explorer and newly synced checkpoints include the emitted block timestamp.
 - `core serve` accepts hosted-provider compatible versioned query paths:
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. The deployment name must match

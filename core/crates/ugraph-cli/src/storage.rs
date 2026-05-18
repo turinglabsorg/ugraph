@@ -100,6 +100,8 @@ pub struct DeploymentMetadataRecord {
 #[derive(Debug, Clone)]
 pub struct SyncBlockActivity {
     pub block_number: u64,
+    pub block_hash: Option<String>,
+    pub block_timestamp: Option<u64>,
     pub created: usize,
     pub updated: usize,
     pub removed: usize,
@@ -118,6 +120,16 @@ pub enum EntityChangeAction {
     Created,
     Updated,
     Removed,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncActivityPage {
+    pub activities: Vec<SyncBlockActivity>,
+    pub page: usize,
+    pub limit: usize,
+    pub has_previous: bool,
+    pub has_next: bool,
+    pub show_empty: bool,
 }
 
 impl EntityChangeAction {
@@ -510,29 +522,96 @@ pub fn list_deployment_metadata(url: &str) -> anyhow::Result<Vec<DeploymentMetad
 pub fn recent_sync_activity(
     url: &str,
     deployment: &str,
-    block_limit: usize,
+    page: usize,
+    limit: usize,
     entity_limit: usize,
-) -> anyhow::Result<Vec<SyncBlockActivity>> {
+    show_empty: bool,
+) -> anyhow::Result<SyncActivityPage> {
     let mut client = connect(url)?;
     migrate(&mut client)?;
-    let block_limit = i64::try_from(block_limit).context("block limit overflows postgres")?;
-    let rows = client.query(
+    let page = page.max(1);
+    let limit = limit.clamp(1, 50);
+    let offset = page.saturating_sub(1).saturating_mul(limit);
+    let query_limit = i64::try_from(limit.saturating_add(1)).context("limit overflows postgres")?;
+    let query_offset = i64::try_from(offset).context("offset overflows postgres")?;
+    let mut block_rows = client.query(
         r#"
         select
           h.block_number,
+          h.block_hash,
+          nullif(h.checkpoint->>'block_timestamp', '')::bigint as block_timestamp
+        from ugraph_history_snapshots h
+        where h.deployment = $1
+          and (
+            $4::boolean
+            or exists (
+              select 1
+              from ugraph_entity_versions v
+              where v.deployment = h.deployment
+                and v.block_number = h.block_number
+            )
+          )
+        order by h.block_number desc
+        limit $2 offset $3
+        "#,
+        &[&deployment, &query_limit, &query_offset, &show_empty],
+    )?;
+    let has_next = block_rows.len() > limit;
+    if has_next {
+        block_rows.truncate(limit);
+    }
+    let block_numbers = block_rows
+        .iter()
+        .map(|row| {
+            let block_number: i64 = row.get("block_number");
+            u64::try_from(block_number).context("activity block is negative")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let postgres_blocks = block_numbers
+        .iter()
+        .map(|block| i64::try_from(*block).context("activity block overflows postgres"))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut blocks = BTreeMap::<u64, SyncBlockActivity>::new();
+    for row in block_rows {
+        let block_number: i64 = row.get("block_number");
+        let block_number = u64::try_from(block_number).context("activity block is negative")?;
+        let block_timestamp: Option<i64> = row.get("block_timestamp");
+        blocks.insert(
+            block_number,
+            SyncBlockActivity {
+                block_number,
+                block_hash: row.get("block_hash"),
+                block_timestamp: block_timestamp
+                    .map(|timestamp| {
+                        u64::try_from(timestamp).context("block timestamp is negative")
+                    })
+                    .transpose()?,
+                created: 0,
+                updated: 0,
+                removed: 0,
+                changes: Vec::new(),
+            },
+        );
+    }
+    if postgres_blocks.is_empty() {
+        return Ok(SyncActivityPage {
+            activities: Vec::new(),
+            page,
+            limit,
+            has_previous: page > 1,
+            has_next: false,
+            show_empty,
+        });
+    }
+    let rows = client.query(
+        r#"
+        select
+          v.block_number,
           v.entity,
           v.id,
           v.removed,
           prev.removed as previous_removed
-        from (
-          select block_number
-          from ugraph_history_snapshots
-          where deployment = $1
-          order by block_number desc
-          limit $2
-        ) h
-        left join ugraph_entity_versions v
-          on v.deployment = $1 and v.block_number = h.block_number
+        from ugraph_entity_versions v
         left join lateral (
           select removed
           from ugraph_entity_versions p
@@ -543,26 +622,19 @@ pub fn recent_sync_activity(
           order by p.block_number desc
           limit 1
         ) prev on v.entity is not null
-        order by h.block_number desc, v.entity nulls last, v.id nulls last
+        where v.deployment = $1
+          and v.block_number = any($2)
+        order by v.block_number desc, v.entity, v.id
         "#,
-        &[&deployment, &block_limit],
+        &[&deployment, &postgres_blocks],
     )?;
-    let mut blocks = BTreeMap::<u64, SyncBlockActivity>::new();
     for row in rows {
         let block_number: i64 = row.get("block_number");
         let block_number = u64::try_from(block_number).context("activity block is negative")?;
-        let activity = blocks
-            .entry(block_number)
-            .or_insert_with(|| SyncBlockActivity {
-                block_number,
-                created: 0,
-                updated: 0,
-                removed: 0,
-                changes: Vec::new(),
-            });
-        let Some(entity) = row.get::<_, Option<String>>("entity") else {
+        let Some(activity) = blocks.get_mut(&block_number) else {
             continue;
         };
+        let entity = row.get::<_, String>("entity");
         let id = row.get::<_, String>("id");
         let removed = row.get::<_, bool>("removed");
         let previous_removed = row.get::<_, Option<bool>>("previous_removed");
@@ -584,7 +656,17 @@ pub fn recent_sync_activity(
                 .push(EntityChangeRecord { entity, id, action });
         }
     }
-    Ok(blocks.into_values().rev().collect())
+    Ok(SyncActivityPage {
+        activities: block_numbers
+            .into_iter()
+            .filter_map(|block| blocks.remove(&block))
+            .collect(),
+        page,
+        limit,
+        has_previous: page > 1,
+        has_next,
+        show_empty,
+    })
 }
 
 pub fn deployment_metadata(
@@ -2017,13 +2099,24 @@ mod tests {
                 entities: vec![fixture_entity("Protocol", "side", "0x11")],
                 dynamic_sources: Vec::new(),
             },
+            HistoricalSnapshot {
+                checkpoint: fixture_checkpoint(4),
+                entities: vec![fixture_entity("Protocol", "side", "0x11")],
+                dynamic_sources: Vec::new(),
+            },
         ];
         store.write(&snapshot)?;
 
-        let activity = recent_sync_activity(&url, &deployment, 3, 10)?;
+        let page = recent_sync_activity(&url, &deployment, 1, 3, 10, false)?;
+        let activity = page.activities;
 
+        assert_eq!(page.page, 1);
+        assert_eq!(page.limit, 3);
+        assert!(!page.show_empty);
         assert_eq!(activity.len(), 3);
         assert_eq!(activity[0].block_number, 3);
+        assert_eq!(activity[0].block_hash.as_deref(), Some("0xblock3"));
+        assert_eq!(activity[0].block_timestamp, Some(1_700_000_003));
         assert_eq!(activity[0].updated, 1);
         assert_eq!(activity[0].removed, 1);
         assert!(activity[0]
@@ -2035,6 +2128,13 @@ mod tests {
         assert_eq!(activity[1].updated, 1);
         assert_eq!(activity[2].block_number, 1);
         assert_eq!(activity[2].created, 1);
+
+        let page = recent_sync_activity(&url, &deployment, 1, 1, 10, true)?;
+        assert!(page.show_empty);
+        assert!(page.has_next);
+        assert_eq!(page.activities.len(), 1);
+        assert_eq!(page.activities[0].block_number, 4);
+        assert!(page.activities[0].changes.is_empty());
 
         cleanup(&url, &deployment)?;
         Ok(())
@@ -2227,6 +2327,7 @@ mod tests {
             from_block: Some(block),
             to_block: block,
             block_hash: Some(format!("0xblock{block}")),
+            block_timestamp: Some(1_700_000_000 + block),
             scanned_logs: 1,
             executed_logs: 1,
             validation_errors: 0,
@@ -2274,6 +2375,7 @@ mod tests {
                 from_block: Some(1),
                 to_block: 2,
                 block_hash: Some("0xblock".to_string()),
+                block_timestamp: None,
                 scanned_logs: 1,
                 executed_logs: 1,
                 validation_errors: 0,
@@ -2298,6 +2400,7 @@ mod tests {
                     from_block: Some(1),
                     to_block: 1,
                     block_hash: Some("0xoldblock".to_string()),
+                    block_timestamp: None,
                     scanned_logs: 1,
                     executed_logs: 1,
                     validation_errors: 0,

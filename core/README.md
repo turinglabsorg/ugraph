@@ -96,7 +96,11 @@ The image uses the same binary for the API and indexer:
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. The public status page lists
   public deployments with their deployer metadata and recent retained sync
-  blocks with created/updated/removed entity deltas.
+  blocks with created/updated/removed entity deltas. Empty sync blocks are
+  hidden by default; use `show_empty=1` to include them. `sync_page` and
+  `sync_limit` paginate the log. `UGRAPH_CHAIN_ID` selects the default block
+  explorer, and `UGRAPH_BLOCK_EXPLORER_URL` can override it with either a base
+  URL or a `{block}` template.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
 - `UGRAPH_MODE=chain-reader` reads one `chain_id` from RPC and writes raw logs
   into Postgres for every registered subscription on that chain. If no explicit

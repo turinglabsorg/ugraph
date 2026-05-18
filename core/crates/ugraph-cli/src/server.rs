@@ -16,6 +16,46 @@ use crate::{
 };
 
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
+const DEFAULT_SYNC_ACTIVITY_LIMIT: usize = 8;
+const MAX_SYNC_ACTIVITY_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, Default)]
+pub struct ServeOptions {
+    pub chain_id: Option<u64>,
+    pub block_explorer_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct SyncActivityOptions {
+    page: usize,
+    limit: usize,
+    show_empty: bool,
+}
+
+impl SyncActivityOptions {
+    fn from_params(params: &BTreeMap<String, String>) -> Self {
+        let page = params
+            .get("sync_page")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(1);
+        let limit = params
+            .get("sync_limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_SYNC_ACTIVITY_LIMIT)
+            .min(MAX_SYNC_ACTIVITY_LIMIT);
+        let show_empty = matches!(
+            params.get("show_empty").map(String::as_str),
+            Some("1" | "true" | "yes" | "on")
+        );
+        Self {
+            page,
+            limit,
+            show_empty,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct GraphqlEndpoint<'a> {
@@ -24,19 +64,25 @@ struct GraphqlEndpoint<'a> {
     version: Option<&'a str>,
 }
 
-pub fn serve_store(store: SnapshotStore, bind: &str, once: bool) -> anyhow::Result<()> {
+pub fn serve_store(
+    store: SnapshotStore,
+    bind: &str,
+    once: bool,
+    options: ServeOptions,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
     println!("UGraph status: http://{bind}/");
     println!("GraphiQL: http://{bind}/graphql");
     for stream in listener.incoming() {
         let stream = stream.with_context(|| format!("accepting connection on {bind}"))?;
         if once {
-            log_connection_error(handle_store_connection(stream, &store), &store);
+            log_connection_error(handle_store_connection(stream, &store, &options), &store);
             break;
         }
         let store = store.clone();
+        let options = options.clone();
         thread::spawn(move || {
-            log_connection_error(handle_store_connection(stream, &store), &store);
+            log_connection_error(handle_store_connection(stream, &store, &options), &store);
         });
     }
     Ok(())
@@ -56,7 +102,11 @@ fn log_connection_error(result: anyhow::Result<()>, store: &SnapshotStore) {
     }
 }
 
-fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyhow::Result<()> {
+fn handle_store_connection(
+    mut stream: TcpStream,
+    store: &SnapshotStore,
+    options: &ServeOptions,
+) -> anyhow::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let request = match read_request(&mut stream) {
         Ok(request) => request,
@@ -98,8 +148,10 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
             Err(_) => ("503 Service Unavailable", None),
         };
         let metadata = deployment_metadata_for_store(store).ok().flatten();
+        let query_params = query_string.map(parse_query_params).unwrap_or_default();
+        let sync_options = SyncActivityOptions::from_params(&query_params);
         let public_deployments = public_deployments_for_store(store).unwrap_or_default();
-        let sync_activity = sync_activity_for_store(store).unwrap_or_default();
+        let sync_activity = sync_activity_for_store(store, &sync_options).ok();
         return write_response(
             &mut stream,
             status,
@@ -109,7 +161,9 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
                 store_status.as_ref(),
                 metadata.as_ref(),
                 &public_deployments,
-                &sync_activity,
+                sync_activity.as_ref(),
+                &sync_options,
+                options,
             )
             .as_bytes(),
         );
@@ -340,6 +394,7 @@ fn write_healthz(stream: &mut TcpStream, store: &SnapshotStore) -> anyhow::Resul
                 "historyLatestBlock": status.history_latest_block,
                 "toBlock": status.checkpoint.to_block,
                 "blockHash": status.checkpoint.block_hash,
+                "blockTimestamp": status.checkpoint.block_timestamp,
                 "complete": status.checkpoint.complete,
                 "validationErrors": status.checkpoint.validation_errors,
             }),
@@ -518,12 +573,25 @@ fn public_deployments_for_store(
 
 fn sync_activity_for_store(
     store: &SnapshotStore,
-) -> anyhow::Result<Vec<storage::SyncBlockActivity>> {
+    options: &SyncActivityOptions,
+) -> anyhow::Result<storage::SyncActivityPage> {
     match store {
-        SnapshotStore::Postgres { url, deployment } => {
-            storage::recent_sync_activity(url, deployment, 8, 8)
-        }
-        SnapshotStore::Json { .. } => Ok(Vec::new()),
+        SnapshotStore::Postgres { url, deployment } => storage::recent_sync_activity(
+            url,
+            deployment,
+            options.page,
+            options.limit,
+            10,
+            options.show_empty,
+        ),
+        SnapshotStore::Json { .. } => Ok(storage::SyncActivityPage {
+            activities: Vec::new(),
+            page: options.page,
+            limit: options.limit,
+            has_previous: options.page > 1,
+            has_next: false,
+            show_empty: options.show_empty,
+        }),
     }
 }
 
@@ -596,7 +664,9 @@ fn home_html(
     status: Option<&StoreStatus>,
     metadata: Option<&storage::DeploymentMetadataRecord>,
     public_deployments: &[storage::DeploymentMetadataRecord],
-    sync_activity: &[storage::SyncBlockActivity],
+    sync_activity: Option<&storage::SyncActivityPage>,
+    sync_options: &SyncActivityOptions,
+    options: &ServeOptions,
 ) -> String {
     let ok = status
         .map(|status| status.checkpoint.complete && status.checkpoint.validation_errors == 0)
@@ -631,7 +701,27 @@ fn home_html(
         .map(|status| status.checkpoint.validation_errors.to_string())
         .unwrap_or_else(|| "-".to_string());
     let public_subgraphs = public_subgraphs_html(public_deployments);
-    let sync_blocks = sync_blocks_html(sync_activity);
+    let sync_controls = sync_controls_html(sync_activity, sync_options);
+    let sync_blocks = sync_blocks_html(sync_activity, options);
+    let chain_id = options
+        .chain_id
+        .map(|chain_id| chain_id.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let explorer = explorer_status_html(options);
+    let sync_page = sync_activity
+        .map(|page| page.page)
+        .unwrap_or(sync_options.page);
+    let sync_mode = sync_activity
+        .map(|page| page.show_empty)
+        .unwrap_or(sync_options.show_empty);
+    let sync_page_label = format!(
+        "page {sync_page} / {}",
+        if sync_mode {
+            "all blocks"
+        } else {
+            "changed blocks"
+        }
+    );
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -679,7 +769,13 @@ fn home_html(
     .warn-text {{ color:var(--warn); font-weight:700; }}
     .hash {{ color:#c8c1ad; }}
     .section {{ border-top:3px solid var(--line); }}
-    .section-title {{ padding:8px 12px; background:var(--paper); color:var(--void); font-size:12px; font-weight:700; text-transform:uppercase; }}
+    .section-head {{ display:flex; flex-wrap:wrap; align-items:stretch; justify-content:space-between; gap:0; background:var(--paper); color:var(--void); }}
+    .section-title {{ padding:8px 12px; color:var(--void); font-size:12px; font-weight:700; text-transform:uppercase; }}
+    .sync-controls {{ display:flex; flex-wrap:wrap; margin-left:auto; border-left:3px solid var(--void); }}
+    .control {{ display:inline-flex; align-items:center; min-height:31px; padding:7px 10px; border-right:3px solid var(--void); color:var(--void); background:var(--paper); font-size:12px; font-weight:700; text-decoration:none; text-transform:uppercase; }}
+    .control:last-child {{ border-right:0; }}
+    .control:hover {{ background:var(--void); color:var(--acid); }}
+    .control.disabled {{ color:#6b665d; pointer-events:none; text-decoration:none; }}
     .subgraph-row {{ display:grid; grid-template-columns:1.1fr .7fr 1fr 1.7fr; gap:0; border-top:3px solid var(--line); }}
     .subgraph-cell {{ min-width:0; padding:12px; border-right:3px solid var(--line); }}
     .subgraph-cell:last-child {{ border-right:0; }}
@@ -687,6 +783,10 @@ fn home_html(
     .subgraph-label {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; }}
     .sync-row {{ display:grid; grid-template-columns:170px minmax(0, 1fr); border-top:3px solid var(--line); }}
     .sync-block {{ padding:12px; border-right:3px solid var(--line); background:#101010; color:var(--acid); font-size:20px; font-weight:700; }}
+    .sync-block a {{ color:var(--acid); }}
+    .block-meta {{ margin-top:8px; color:var(--ink); font-size:12px; font-weight:700; line-height:1.35; word-break:break-word; }}
+    .block-meta a {{ color:var(--ink); }}
+    .block-hash {{ color:var(--muted); }}
     .sync-detail {{ min-width:0; padding:12px; }}
     .sync-counts {{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }}
     .sync-count {{ border:2px solid var(--line); padding:5px 7px; font-size:12px; font-weight:700; text-transform:uppercase; }}
@@ -704,7 +804,7 @@ fn home_html(
     .footer {{ display:flex; flex-wrap:wrap; align-items:center; gap:0; border-top:3px solid var(--line); background:var(--void); }}
     .button {{ display:inline-flex; align-items:center; justify-content:center; min-height:46px; padding:10px 14px; border-right:3px solid var(--line); background:var(--void); color:var(--ink); text-decoration:none; font-size:13px; font-weight:700; text-transform:uppercase; }}
     .button:hover {{ background:var(--paper); color:var(--void); }}
-    @media (max-width: 900px) {{ body::after {{ display:none; }} .shell {{ box-shadow:7px 7px 0 var(--acid); }} .topbar {{ flex-direction:column; }} header {{ grid-template-columns:86px 1fr; }} .mark {{ min-height:96px; font-size:25px; }} .brand {{ padding:13px; }} h1 {{ font-size:42px; }} .status {{ grid-column:1 / -1; border-left:0; border-top:3px solid var(--line); min-height:54px; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:3px solid var(--line); }} .metric:nth-child(2n) {{ border-right:0; }} .metric:first-child .value, .value {{ font-size:24px; }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:3px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} .subgraph-row {{ grid-template-columns:1fr; }} .subgraph-cell {{ border-right:0; border-bottom:3px solid var(--line); }} .subgraph-cell:last-child {{ border-bottom:0; }} .sync-row {{ grid-template-columns:1fr; }} .sync-block {{ border-right:0; border-bottom:3px solid var(--line); }} .footer {{ display:grid; grid-template-columns:1fr; }} .button {{ margin-left:0; border-right:0; border-left:0; border-bottom:3px solid var(--line); width:100%; justify-content:flex-start; }} }}
+    @media (max-width: 900px) {{ body::after {{ display:none; }} .shell {{ box-shadow:7px 7px 0 var(--acid); }} .topbar {{ flex-direction:column; }} header {{ grid-template-columns:86px 1fr; }} .mark {{ min-height:96px; font-size:25px; }} .brand {{ padding:13px; }} h1 {{ font-size:42px; }} .status {{ grid-column:1 / -1; border-left:0; border-top:3px solid var(--line); min-height:54px; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:3px solid var(--line); }} .metric:nth-child(2n) {{ border-right:0; }} .metric:first-child .value, .value {{ font-size:24px; }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:3px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} .section-head {{ display:grid; grid-template-columns:1fr; }} .sync-controls {{ margin-left:0; border-left:0; border-top:3px solid var(--void); }} .control {{ flex:1 1 auto; justify-content:center; }} .subgraph-row {{ grid-template-columns:1fr; }} .subgraph-cell {{ border-right:0; border-bottom:3px solid var(--line); }} .subgraph-cell:last-child {{ border-bottom:0; }} .sync-row {{ grid-template-columns:1fr; }} .sync-block {{ border-right:0; border-bottom:3px solid var(--line); }} .footer {{ display:grid; grid-template-columns:1fr; }} .button {{ margin-left:0; border-right:0; border-left:0; border-bottom:3px solid var(--line); width:100%; justify-content:flex-start; }} }}
   </style>
 </head>
 <body>
@@ -743,18 +843,19 @@ fn home_html(
         <div class="panel">
           <ul class="terminal" aria-label="Runtime terminal">
             <li><span class="key">$ runtime</span><span class="{health_class}">{health_text}</span></li>
-            <li><span class="key">$ query</span><span>versioned endpoint active</span></li>
-            <li><span class="key">$ api</span><span>public HTTP interface</span></li>
+            <li><span class="key">$ chain</span><code>{chain_id}</code></li>
+            <li><span class="key">$ explorer</span>{explorer}</li>
+            <li><span class="key">$ sync_page</span><span>{sync_page_label}</span></li>
             <li><span class="key">$ refresh</span><span>10 seconds</span></li>
           </ul>
         </div>
       </section>
       <section class="section" aria-label="Public subgraphs">
-        <div class="section-title">PUBLIC SUBGRAPHS</div>
+        <div class="section-head"><div class="section-title">PUBLIC SUBGRAPHS</div></div>
         {public_subgraphs}
       </section>
       <section class="section" aria-label="Recent sync blocks">
-        <div class="section-title">SYNC BLOCKS</div>
+        <div class="section-head"><div class="section-title">SYNC BLOCKS</div>{sync_controls}</div>
         {sync_blocks}
       </section>
       <nav class="footer" aria-label="Service links">
@@ -765,6 +866,14 @@ fn home_html(
       </nav>
     </section>
   </main>
+  <script>
+    document.querySelectorAll('time[data-timestamp]').forEach((node) => {{
+      const timestamp = Number(node.getAttribute('data-timestamp'));
+      if (Number.isFinite(timestamp)) {{
+        node.textContent = new Date(timestamp * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+      }}
+    }});
+  </script>
 </body>
 </html>"#,
         store = html_escape(&store.label()),
@@ -782,7 +891,11 @@ fn home_html(
         history = history,
         validation_errors = validation_errors,
         public_subgraphs = public_subgraphs,
+        sync_controls = sync_controls,
         sync_blocks = sync_blocks,
+        chain_id = html_escape(&chain_id),
+        explorer = explorer,
+        sync_page_label = html_escape(&sync_page_label),
         health_class = if ok { "ok-text" } else { "warn-text" },
         health_text = if ok {
             "sync complete"
@@ -829,11 +942,74 @@ fn public_subgraphs_html(rows: &[storage::DeploymentMetadataRecord]) -> String {
         .join("")
 }
 
-fn sync_blocks_html(rows: &[storage::SyncBlockActivity]) -> String {
-    if rows.is_empty() {
+fn sync_controls_html(
+    page: Option<&storage::SyncActivityPage>,
+    requested: &SyncActivityOptions,
+) -> String {
+    let page_number = page.map(|page| page.page).unwrap_or(requested.page);
+    let limit = page.map(|page| page.limit).unwrap_or(requested.limit);
+    let show_empty = page
+        .map(|page| page.show_empty)
+        .unwrap_or(requested.show_empty);
+    let previous = page
+        .filter(|page| page.has_previous)
+        .map(|_| page_number.saturating_sub(1));
+    let next = page.filter(|page| page.has_next).map(|_| page_number + 1);
+    let mode_url = sync_activity_url(1, limit, !show_empty);
+    let mode_label = if show_empty {
+        "hide empty"
+    } else {
+        "show empty"
+    };
+    let previous_html = previous
+        .map(|page| {
+            format!(
+                r#"<a class="control" href="{url}">prev</a>"#,
+                url = html_escape(&sync_activity_url(page, limit, show_empty))
+            )
+        })
+        .unwrap_or_else(|| r#"<span class="control disabled">prev</span>"#.to_string());
+    let next_html = next
+        .map(|page| {
+            format!(
+                r#"<a class="control" href="{url}">next</a>"#,
+                url = html_escape(&sync_activity_url(page, limit, show_empty))
+            )
+        })
+        .unwrap_or_else(|| r#"<span class="control disabled">next</span>"#.to_string());
+    format!(
+        concat!(
+            r#"<div class="sync-controls" aria-label="Sync log controls">"#,
+            "{previous}",
+            r#"<span class="control disabled">page {page}</span>"#,
+            "{next}",
+            r#"<a class="control" href="{mode_url}">{mode_label}</a>"#,
+            r#"</div>"#
+        ),
+        previous = previous_html,
+        page = page_number,
+        next = next_html,
+        mode_url = html_escape(&mode_url),
+        mode_label = mode_label
+    )
+}
+
+fn sync_activity_url(page: usize, limit: usize, show_empty: bool) -> String {
+    format!(
+        "/status?sync_page={page}&sync_limit={limit}&show_empty={}",
+        usize::from(show_empty)
+    )
+}
+
+fn sync_blocks_html(page: Option<&storage::SyncActivityPage>, options: &ServeOptions) -> String {
+    let Some(page) = page else {
+        return r#"<div class="empty-row">sync activity unavailable</div>"#.to_string();
+    };
+    if page.activities.is_empty() {
         return r#"<div class="empty-row">no retained sync activity</div>"#.to_string();
     }
-    rows.iter()
+    page.activities
+        .iter()
         .map(|activity| {
             let changes = if activity.changes.is_empty() {
                 r#"<span class="change"><b>idle</b><code>no entity changes</code></span>"#
@@ -854,10 +1030,30 @@ fn sync_blocks_html(rows: &[storage::SyncBlockActivity]) -> String {
                     .collect::<Vec<_>>()
                     .join("")
             };
+            let block = block_link_html(activity.block_number, options);
+            let explorer = block_explorer_url(options, activity.block_number)
+                .map(|url| {
+                    format!(
+                        r#"<a href="{url}" rel="noopener">explorer</a>"#,
+                        url = html_escape(&url)
+                    )
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let block_hash = activity
+                .block_hash
+                .as_deref()
+                .map(short_hash)
+                .unwrap_or_else(|| "-".to_string());
+            let emitted = block_timestamp_html(activity.block_timestamp);
             format!(
                 concat!(
                     r#"<article class="sync-row">"#,
-                    r#"<div class="sync-block">#{block}</div>"#,
+                    r#"<div class="sync-block">"#,
+                    r#"<div>{block}</div>"#,
+                    r#"<div class="block-meta">emitted {emitted}</div>"#,
+                    r#"<div class="block-meta">hash <span class="block-hash">{block_hash}</span></div>"#,
+                    r#"<div class="block-meta">{explorer}</div>"#,
+                    r#"</div>"#,
                     r#"<div class="sync-detail">"#,
                     r#"<div class="sync-counts">"#,
                     r#"<span class="sync-count created">created {created}</span>"#,
@@ -868,7 +1064,10 @@ fn sync_blocks_html(rows: &[storage::SyncBlockActivity]) -> String {
                     r#"</div>"#,
                     r#"</article>"#
                 ),
-                block = activity.block_number,
+                block = block,
+                emitted = emitted,
+                block_hash = html_escape(&block_hash),
+                explorer = explorer,
                 created = activity.created,
                 updated = activity.updated,
                 removed = activity.removed,
@@ -877,6 +1076,101 @@ fn sync_blocks_html(rows: &[storage::SyncBlockActivity]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn block_link_html(block: u64, options: &ServeOptions) -> String {
+    block_explorer_url(options, block)
+        .map(|url| {
+            format!(
+                r#"<a href="{url}" rel="noopener">#{block}</a>"#,
+                url = html_escape(&url)
+            )
+        })
+        .unwrap_or_else(|| format!("#{block}"))
+}
+
+fn block_timestamp_html(timestamp: Option<u64>) -> String {
+    timestamp
+        .map(|timestamp| {
+            format!(
+                r#"<time data-timestamp="{timestamp}">{timestamp}</time>"#,
+                timestamp = timestamp
+            )
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn short_hash(value: &str) -> String {
+    if value.len() <= 18 {
+        return value.to_string();
+    }
+    format!("{}...{}", &value[..10], &value[value.len() - 6..])
+}
+
+fn explorer_status_html(options: &ServeOptions) -> String {
+    explorer_home_url(options)
+        .map(|url| {
+            format!(
+                r#"<a href="{url}" rel="noopener">{label}</a>"#,
+                url = html_escape(&url),
+                label = html_escape(&explorer_label(&url))
+            )
+        })
+        .unwrap_or_else(|| "<span>-</span>".to_string())
+}
+
+fn explorer_label(url: &str) -> String {
+    url.trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))
+        .unwrap_or(url.trim())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn explorer_home_url(options: &ServeOptions) -> Option<String> {
+    let template = block_explorer_template(options)?;
+    if let Some((root, _)) = template.split_once("/block/{block}") {
+        return Some(root.to_string());
+    }
+    if let Some((root, _)) = template.split_once("{block}") {
+        return Some(root.trim_end_matches('/').to_string());
+    }
+    Some(template.trim_end_matches('/').to_string())
+}
+
+fn block_explorer_url(options: &ServeOptions, block: u64) -> Option<String> {
+    let template = block_explorer_template(options)?;
+    if template.contains("{block}") {
+        Some(template.replace("{block}", &block.to_string()))
+    } else {
+        Some(format!("{}/{}", template.trim_end_matches('/'), block))
+    }
+}
+
+fn block_explorer_template(options: &ServeOptions) -> Option<String> {
+    if let Some(configured) = options
+        .block_explorer_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(configured.to_string());
+    }
+    let template = match options.chain_id? {
+        1 => "https://etherscan.io/block/{block}",
+        10 => "https://optimistic.etherscan.io/block/{block}",
+        56 => "https://bscscan.com/block/{block}",
+        100 => "https://gnosisscan.io/block/{block}",
+        137 => "https://polygonscan.com/block/{block}",
+        8453 => "https://basescan.org/block/{block}",
+        84532 => "https://sepolia.basescan.org/block/{block}",
+        42161 => "https://arbiscan.io/block/{block}",
+        43114 => "https://snowtrace.io/block/{block}",
+        11155111 => "https://sepolia.etherscan.io/block/{block}",
+        _ => return None,
+    };
+    Some(template.to_string())
 }
 
 fn html_escape(value: &str) -> String {
@@ -1119,6 +1413,7 @@ mod tests {
                 from_block: Some(10),
                 to_block: 42,
                 block_hash: Some("0xabc".to_string()),
+                block_timestamp: None,
                 scanned_logs: 3,
                 executed_logs: 2,
                 validation_errors: 1,
@@ -1205,6 +1500,7 @@ mod tests {
                 from_block: Some(10),
                 to_block: 42,
                 block_hash: Some("0xabc".to_string()),
+                block_timestamp: None,
                 scanned_logs: 3,
                 executed_logs: 2,
                 validation_errors: 0,
@@ -1227,24 +1523,44 @@ mod tests {
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
-        let sync_activity = vec![storage::SyncBlockActivity {
-            block_number: 42,
-            created: 1,
-            updated: 2,
-            removed: 0,
-            changes: vec![storage::EntityChangeRecord {
-                entity: "Token".to_string(),
-                id: "0xabc".to_string(),
-                action: storage::EntityChangeAction::Updated,
+        let sync_activity = storage::SyncActivityPage {
+            activities: vec![storage::SyncBlockActivity {
+                block_number: 42,
+                block_hash: Some("0xabc123456789def".to_string()),
+                block_timestamp: Some(1_700_000_000),
+                created: 1,
+                updated: 2,
+                removed: 0,
+                changes: vec![storage::EntityChangeRecord {
+                    entity: "Token".to_string(),
+                    id: "0xabc".to_string(),
+                    action: storage::EntityChangeAction::Updated,
+                }],
             }],
-        }];
+            page: 1,
+            limit: 8,
+            has_previous: false,
+            has_next: true,
+            show_empty: false,
+        };
+        let sync_options = SyncActivityOptions {
+            page: 1,
+            limit: 8,
+            show_empty: false,
+        };
+        let serve_options = ServeOptions {
+            chain_id: Some(11155111),
+            block_explorer_url: None,
+        };
 
         let html = home_html(
             &store,
             Some(&status),
             Some(&metadata),
             std::slice::from_ref(&metadata),
-            &sync_activity,
+            Some(&sync_activity),
+            &sync_options,
+            &serve_options,
         );
 
         assert!(html.contains("OPERATIONAL"));
@@ -1255,6 +1571,15 @@ mod tests {
         assert!(html.contains("ops@ugraph.local"));
         assert!(html.contains("updated"));
         assert!(html.contains("Token:0xabc"));
+        assert!(html.contains("sepolia.etherscan.io/block/42"));
+        assert!(html.contains("data-timestamp=\"1700000000\""));
+        assert!(html.contains("show empty"));
+        assert!(html.contains("page 1 / changed blocks"));
+        assert!(html.contains("$ chain"));
+        assert!(!html.contains("$ query"));
+        assert!(!html.contains("$ api"));
+        assert!(!html.contains("versioned endpoint active"));
+        assert!(!html.contains("public HTTP interface"));
         assert!(!html.contains(">Range<"));
         assert!(!html.contains("goldsky"));
         assert!(!html.contains("graph_node"));

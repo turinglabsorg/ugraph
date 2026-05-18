@@ -65,6 +65,12 @@ case "$mode" in
     else
       set -- "$@" --storage json --state-file "$state_file"
     fi
+    if [ -n "${UGRAPH_CHAIN_ID:-}" ]; then
+      set -- "$@" --chain-id "$UGRAPH_CHAIN_ID"
+    fi
+    if [ -n "${UGRAPH_BLOCK_EXPLORER_URL:-}" ]; then
+      set -- "$@" --block-explorer-url "$UGRAPH_BLOCK_EXPLORER_URL"
+    fi
     exec "$@"
     ;;
   sync|indexer|worker)

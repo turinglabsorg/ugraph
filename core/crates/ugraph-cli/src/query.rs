@@ -334,6 +334,7 @@ fn empty_snapshot_at(snapshot: &StoreSnapshot, block: u64, hash: Option<String>)
             from_block: snapshot.checkpoint.from_block,
             to_block: block,
             block_hash: hash,
+            block_timestamp: None,
             scanned_logs: 0,
             executed_logs: 0,
             validation_errors: snapshot.checkpoint.validation_errors,
@@ -1389,7 +1390,7 @@ fn standard_directives() -> Vec<Value> {
             vec![argument(
                 "reason",
                 named_output_type_ref_stub("SCALAR", "String"),
-                json!("No longer supported"),
+                json!("\"No longer supported\""),
             )],
         ),
         directive(
@@ -2216,7 +2217,7 @@ mod tests {
             r#"
             {
               __schema {
-                directives { name locations }
+                directives { name locations args { name defaultValue } }
                 queryType { fields { name } }
               }
               queryType: __type(name: "Query") {
@@ -2251,6 +2252,17 @@ mod tests {
         assert!(directives
             .iter()
             .any(|directive| directive["name"] == "skip"));
+        let deprecated = directives
+            .iter()
+            .find(|directive| directive["name"] == "deprecated")
+            .expect("deprecated directive");
+        let reason = deprecated["args"]
+            .as_array()
+            .expect("deprecated args")
+            .iter()
+            .find(|arg| arg["name"] == "reason")
+            .expect("deprecated reason");
+        assert_eq!(reason["defaultValue"], "\"No longer supported\"");
 
         let query_fields = result["data"]["queryType"]["fields"]
             .as_array()
@@ -2513,6 +2525,7 @@ mod tests {
                 from_block: Some(1),
                 to_block: 42,
                 block_hash: Some("0xblock".to_string()),
+                block_timestamp: None,
                 scanned_logs: 2,
                 executed_logs: 2,
                 validation_errors: 0,
@@ -2553,6 +2566,7 @@ mod tests {
                     from_block: Some(1),
                     to_block: 20,
                     block_hash: Some("0xold".to_string()),
+                    block_timestamp: None,
                     scanned_logs: 1,
                     executed_logs: 1,
                     validation_errors: 0,

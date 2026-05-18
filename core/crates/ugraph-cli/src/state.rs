@@ -25,6 +25,8 @@ pub struct SyncCheckpoint {
     pub to_block: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_timestamp: Option<u64>,
     pub scanned_logs: usize,
     pub executed_logs: usize,
     pub validation_errors: usize,
