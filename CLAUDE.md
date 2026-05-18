@@ -29,8 +29,14 @@
   `UGRAPH_RPC_TIMEOUT_SECS`.
 - When no explicit RPC is configured, `chain-reader` tries all resolved
   Chainlist URLs in order rather than pinning itself to the first URL.
+- Shared feed reorg handling is implemented: `chain-reader` compares stored
+  cursor hashes with the selected RPC and rolls back raw blocks/logs plus
+  affected subscription cursors from the first mismatched block.
 - Chainlist fallback smoke with no explicit RPC passed on Sepolia block
   `10845895`, registering 7 subscriptions and inserting 2 logs.
+- Raw feed reorg smoke passed on Sepolia block `10845895`: after cursor hash
+  corruption, `chain-reader` deleted 1 raw block and 2 raw logs, rewound 7
+  subscriptions, and reinserted 2 canonical logs.
 - Sepolia local smoke should prefer `https://sepolia.drpc.org`; the publicnode
   Sepolia endpoint timed out on some `eth_getLogs` calls during dynamic-source
   deploy testing.

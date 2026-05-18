@@ -100,7 +100,10 @@
   Postgres feed tables. `core sync --log-source postgres-feed` consumes that
   feed instead of calling `eth_getLogs` directly. Direct RPC sync remains
   available with `--log-source rpc`. When no explicit RPC is configured,
-  `chain-reader` tries resolved Chainlist URLs in order.
+  `chain-reader` tries resolved Chainlist URLs in order. Before appending new
+  logs, it checks stored feed cursor hashes against the selected RPC and rolls
+  the chain feed back from the first mismatched block by pruning raw
+  blocks/logs and rewinding affected subscription cursors.
 - `core deploy --provider local` registers feed subscriptions, runs bounded
   chain-reader/sync passes when using `postgres-feed`, and only reports success
   when dynamically created data source subscriptions have been backfilled and
@@ -173,6 +176,10 @@
 - Chainlist fallback smoke with no explicit RPC also read Sepolia block
   `10845895`, registered 7 subscriptions, and inserted 2 logs after skipping
   bad public endpoints.
+- Raw feed reorg smoke over Sepolia block `10845895` passed: after manually
+  corrupting subscription cursor hashes, `chain-reader` rolled back from that
+  block, deleted 1 raw block and 2 raw logs, rewound 7 subscriptions, and
+  reinserted the 2 canonical logs.
 - Redis is out of scope for now.
 - MongoDB is not the primary compatibility path. It can be explored behind a store adapter later, but only if it can prove equivalent behavior for GraphQL filters, ordering, relationships, historical block semantics, and atomic block commits.
 - SQLite can be used for local development and small tests, not as the production compatibility target.

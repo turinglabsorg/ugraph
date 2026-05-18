@@ -88,7 +88,10 @@ The image uses the same binary for the API and indexer:
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
 - `UGRAPH_MODE=chain-reader` reads one `chain_id` from RPC and writes raw logs
   into Postgres for every registered subscription on that chain. If no explicit
-  RPC URL is configured, it tries resolved Chainlist URLs in order.
+  RPC URL is configured, it tries resolved Chainlist URLs in order. Before
+  appending new logs, it checks feed cursor hashes against the selected RPC and
+  rolls back raw blocks/logs plus affected cursors from the first mismatched
+  block.
 - `UGRAPH_STORAGE=postgres` should be used for shared API/indexer deployments.
 - `UGRAPH_LOG_SOURCE=rpc|postgres-feed` controls whether `sync` reads logs
   directly from RPC or from the shared Postgres raw feed. The default remains

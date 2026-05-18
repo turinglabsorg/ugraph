@@ -86,6 +86,10 @@ writes raw logs into those tables. When no explicit RPC URL is configured, it
 tries resolved Chainlist URLs in order. `ugraph sync --log-source
 postgres-feed` loads matching logs from Postgres instead of calling
 `eth_getLogs`. The direct RPC path remains available through `--log-source rpc`.
+Before appending new logs, `chain-reader` validates stored subscription cursor
+hashes against the selected RPC. On mismatch it treats the raw feed as reorged:
+raw blocks/logs are pruned from the first mismatched block and every affected
+subscription cursor for that chain is rewound.
 
 Target CLI flow:
 

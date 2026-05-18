@@ -109,7 +109,10 @@ docker compose up --build
 - `chain-reader` owns RPC polling for one `chain_id` and writes raw logs for
   all registered subscriptions on that chain. Passing a manifest registers its
   static data source subscriptions. When no explicit RPC is configured,
-  `chain-reader` tries resolved Chainlist URLs in order.
+  `chain-reader` tries resolved Chainlist URLs in order. Before appending new
+  logs, it checks stored feed cursor hashes against the selected RPC and rolls
+  the chain feed back from the first mismatched block by pruning raw
+  blocks/logs and rewinding affected subscription cursors.
 - `deploy --provider local` registers feed subscriptions, runs bounded
   chain-reader/sync passes for `postgres-feed`, and only succeeds once dynamic
   data source subscriptions created by mappings are backfilled and the
@@ -153,6 +156,10 @@ docker compose up --build
 - Chainlist fallback smoke with no explicit RPC also read Sepolia block
   `10845895`, registered 7 subscriptions, and inserted 2 logs after skipping
   bad public endpoints.
+- Raw feed reorg smoke over Sepolia block `10845895` passed: after manually
+  corrupting subscription cursor hashes, `chain-reader` rolled back from that
+  block, deleted 1 raw block and 2 raw logs, rewound 7 subscriptions, and
+  reinserted the 2 canonical logs.
 - Uniswap v3 mainnet stress fixture: official `Uniswap/v3-subgraph` builds with
   `graph-cli`, `ugraph doctor` and `compat` pass for 1 static data source, 1
   template, 2 WASM modules, 6 handlers, and 20 imported host exports with no

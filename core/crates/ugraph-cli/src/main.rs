@@ -1891,7 +1891,16 @@ fn run_chain_reader_scan(
         None => latest_block_number(rpc_url)?,
     };
     let to_block_hash = fetch_block_hash(rpc_url, to_block)?;
-    let subscriptions = storage::list_feed_subscriptions(&input.postgres_url, input.chain_id)?;
+    let mut subscriptions = storage::list_feed_subscriptions(&input.postgres_url, input.chain_id)?;
+    let rollback = match feed_reorg_rollback_block(&subscriptions, rpc_url)? {
+        Some(block) => {
+            let rollback =
+                storage::rollback_feed_chain(&input.postgres_url, input.chain_id, block)?;
+            subscriptions = storage::list_feed_subscriptions(&input.postgres_url, input.chain_id)?;
+            Some(rollback)
+        }
+        None => None,
+    };
     let mut inserted_logs = 0_u64;
     for subscription in &subscriptions {
         let from_block = subscription
@@ -1924,7 +1933,36 @@ fn run_chain_reader_scan(
         subscriptions: subscriptions.len(),
         to_block: Some(to_block),
         inserted_logs,
+        rollback,
     })
+}
+
+fn feed_reorg_rollback_block(
+    subscriptions: &[storage::FeedSubscription],
+    rpc_url: &str,
+) -> anyhow::Result<Option<u64>> {
+    let mut cursors = BTreeMap::new();
+    for subscription in subscriptions {
+        let (Some(cursor_block), Some(cursor_hash)) = (
+            subscription.cursor_block,
+            subscription.cursor_hash.as_deref(),
+        ) else {
+            continue;
+        };
+        cursors
+            .entry(cursor_block)
+            .or_insert(cursor_hash.to_string());
+    }
+    let mut rollback_block = None;
+    for (block, stored_hash) in cursors {
+        let Some(rpc_hash) = fetch_block_hash(rpc_url, block)? else {
+            continue;
+        };
+        if !stored_hash.eq_ignore_ascii_case(&rpc_hash) {
+            rollback_block = Some(rollback_block.map_or(block, |current: u64| current.min(block)));
+        }
+    }
+    Ok(rollback_block)
 }
 
 fn run_doctor_report(

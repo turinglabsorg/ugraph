@@ -33,6 +33,7 @@ pub struct FeedSubscription {
     pub address: String,
     pub from_block: u64,
     pub cursor_block: Option<u64>,
+    pub cursor_hash: Option<String>,
     pub topic0s: Vec<String>,
 }
 
@@ -42,6 +43,17 @@ pub struct FeedIngestReport {
     pub subscriptions: usize,
     pub to_block: Option<u64>,
     pub inserted_logs: u64,
+    pub rollback: Option<FeedRollbackReport>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FeedRollbackReport {
+    pub chain_id: u64,
+    pub from_block: u64,
+    pub to_block: Option<u64>,
+    pub deleted_blocks: u64,
+    pub deleted_logs: u64,
+    pub updated_subscriptions: u64,
 }
 
 impl SnapshotStore {
@@ -658,7 +670,7 @@ pub fn list_feed_subscriptions(url: &str, chain_id: u64) -> anyhow::Result<Vec<F
         .query(
             r#"
             select chain_id, deployment, source, template, address, from_block,
-              cursor_block, topic0s
+              cursor_block, cursor_hash, topic0s
             from ugraph_feed_subscriptions
             where chain_id = $1 and active = true
             order by deployment, source, address, from_block
@@ -685,7 +697,90 @@ fn row_to_feed_subscription(row: postgres::Row) -> anyhow::Result<FeedSubscripti
         cursor_block: cursor_block
             .map(|block| u64::try_from(block).context("subscription cursor block is negative"))
             .transpose()?,
+        cursor_hash: row.get("cursor_hash"),
         topic0s: serde_json::from_value(topic0s_value).context("decoding subscription topic0s")?,
+    })
+}
+
+pub fn rollback_feed_chain(
+    url: &str,
+    chain_id: u64,
+    from_block: u64,
+) -> anyhow::Result<FeedRollbackReport> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let mut tx = client.transaction()?;
+    let chain_id_i64 = i64::try_from(chain_id).context("chain id overflows postgres")?;
+    let from_block_i64 = i64::try_from(from_block).context("rollback block overflows postgres")?;
+    let max_raw_block = tx
+        .query_one(
+            r#"
+            select greatest(
+              coalesce((select max(block_number) from ugraph_raw_blocks where chain_id = $1 and block_number >= $2), -1),
+              coalesce((select max(block_number) from ugraph_raw_logs where chain_id = $1 and block_number >= $2), -1),
+              coalesce((select max(cursor_block) from ugraph_feed_subscriptions where chain_id = $1 and cursor_block >= $2), -1)
+            )
+            "#,
+            &[&chain_id_i64, &from_block_i64],
+        )?
+        .get::<_, i64>(0);
+    let to_block = if max_raw_block >= 0 {
+        Some(u64::try_from(max_raw_block).context("rollback max block is negative")?)
+    } else {
+        None
+    };
+    let rollback_cursor_block = from_block
+        .checked_sub(1)
+        .map(|block| i64::try_from(block).context("rollback cursor block overflows postgres"))
+        .transpose()?;
+    let rollback_cursor_hash: Option<String> = match rollback_cursor_block {
+        Some(block) => tx
+            .query_opt(
+                "select block_hash from ugraph_raw_blocks where chain_id = $1 and block_number = $2",
+                &[&chain_id_i64, &block],
+            )?
+            .and_then(|row| row.get::<_, Option<String>>("block_hash")),
+        None => None,
+    };
+    let deleted_logs = tx.execute(
+        "delete from ugraph_raw_logs where chain_id = $1 and block_number >= $2",
+        &[&chain_id_i64, &from_block_i64],
+    )?;
+    let deleted_blocks = tx.execute(
+        "delete from ugraph_raw_blocks where chain_id = $1 and block_number >= $2",
+        &[&chain_id_i64, &from_block_i64],
+    )?;
+    let updated_subscriptions = match rollback_cursor_block {
+        Some(block) => tx.execute(
+            r#"
+            update ugraph_feed_subscriptions
+            set cursor_block = $1, cursor_hash = $2, updated_at = now()
+            where chain_id = $3 and cursor_block >= $4
+            "#,
+            &[
+                &block,
+                &rollback_cursor_hash,
+                &chain_id_i64,
+                &from_block_i64,
+            ],
+        )?,
+        None => tx.execute(
+            r#"
+            update ugraph_feed_subscriptions
+            set cursor_block = null, cursor_hash = null, updated_at = now()
+            where chain_id = $1 and cursor_block >= $2
+            "#,
+            &[&chain_id_i64, &from_block_i64],
+        )?,
+    };
+    tx.commit()?;
+    Ok(FeedRollbackReport {
+        chain_id,
+        from_block,
+        to_block,
+        deleted_blocks,
+        deleted_logs,
+        updated_subscriptions,
     })
 }
 
@@ -1116,7 +1211,9 @@ create index if not exists ugraph_raw_logs_lookup
 mod tests {
     use std::{collections::BTreeMap, env};
 
-    use ugraph_core::{EntityField, EntitySchema, EntityType};
+    use ugraph_core::{
+        EntityField, EntitySchema, EntityType, EventTriggerPlan, RawEthereumLog, SourcePlan,
+    };
     use ugraph_runtime::StoreValue;
 
     use super::*;
@@ -1182,6 +1279,49 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn feed_rollback_prunes_raw_rows_and_rewinds_cursors() -> anyhow::Result<()> {
+        let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
+            return Ok(());
+        };
+        let chain_id = 9_000_000_000_u64 + u64::from(std::process::id());
+        let deployment = format!("ugraph_feed_test_{}", std::process::id());
+        let source = fixture_source();
+        register_feed_source_subscriptions(
+            &url,
+            &deployment,
+            chain_id,
+            std::slice::from_ref(&source),
+        )?;
+        let subscriptions = list_feed_subscriptions(&url, chain_id)?;
+        assert_eq!(subscriptions.len(), 1);
+        write_feed_logs(
+            &url,
+            &subscriptions[0],
+            &[fixture_raw_log()],
+            10,
+            Some("0xhash10"),
+        )?;
+
+        assert_eq!(
+            feed_block_hash(&url, chain_id, 10)?,
+            Some("0xhash10".to_string())
+        );
+        let report = rollback_feed_chain(&url, chain_id, 10)?;
+
+        assert_eq!(report.from_block, 10);
+        assert_eq!(report.to_block, Some(10));
+        assert_eq!(report.deleted_blocks, 1);
+        assert_eq!(report.deleted_logs, 1);
+        assert_eq!(report.updated_subscriptions, 1);
+        assert_eq!(feed_block_hash(&url, chain_id, 10)?, None);
+        let subscriptions = list_feed_subscriptions(&url, chain_id)?;
+        assert_eq!(subscriptions[0].cursor_block, Some(9));
+        assert_eq!(subscriptions[0].cursor_hash, None);
+        cleanup_feed(&url, chain_id)?;
+        Ok(())
+    }
+
     fn cleanup(url: &str, deployment: &str) -> anyhow::Result<()> {
         let mut client = connect(url)?;
         client.execute(
@@ -1189,6 +1329,64 @@ mod tests {
             &[&deployment],
         )?;
         Ok(())
+    }
+
+    fn cleanup_feed(url: &str, chain_id: u64) -> anyhow::Result<()> {
+        let mut client = connect(url)?;
+        migrate(&mut client)?;
+        let chain_id = i64::try_from(chain_id).context("chain id overflows postgres")?;
+        client.execute(
+            "delete from ugraph_raw_logs where chain_id = $1",
+            &[&chain_id],
+        )?;
+        client.execute(
+            "delete from ugraph_raw_blocks where chain_id = $1",
+            &[&chain_id],
+        )?;
+        client.execute(
+            "delete from ugraph_feed_subscriptions where chain_id = $1",
+            &[&chain_id],
+        )?;
+        Ok(())
+    }
+
+    fn fixture_source() -> SourcePlan {
+        SourcePlan {
+            name: "Source".to_string(),
+            template: false,
+            dynamic: false,
+            template_name: None,
+            params: Vec::new(),
+            kind: "ethereum/contract".to_string(),
+            network: Some("test".to_string()),
+            address: Some("0x0000000000000000000000000000000000000001".to_string()),
+            abi: Some("Source".to_string()),
+            start_block: Some(10),
+            end_block: None,
+            triggers: vec![EventTriggerPlan {
+                event: "Event()".to_string(),
+                handler: "handleEvent".to_string(),
+                signature: "Event()".to_string(),
+                topic0: "0x0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+                inputs: Vec::new(),
+            }],
+        }
+    }
+
+    fn fixture_raw_log() -> RawEthereumLog {
+        RawEthereumLog {
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            topics: vec![
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ],
+            data: "0x".to_string(),
+            block_number: Some("0xa".to_string()),
+            block_hash: Some("0xhash10".to_string()),
+            transaction_hash: Some("0xtx".to_string()),
+            transaction_index: Some("0x0".to_string()),
+            log_index: Some("0x0".to_string()),
+        }
     }
 
     fn fixture_snapshot() -> StoreSnapshot {
