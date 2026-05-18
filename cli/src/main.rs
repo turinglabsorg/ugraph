@@ -2587,18 +2587,7 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         .filter(|snapshot| !snapshot.checkpoint.complete)
         .map(processed_log_set)
         .unwrap_or_default();
-    let from_block = input.from_block.or_else(|| {
-        previous.as_ref().map(|snapshot| {
-            if snapshot.checkpoint.complete {
-                snapshot.checkpoint.to_block.saturating_add(1)
-            } else {
-                snapshot
-                    .checkpoint
-                    .from_block
-                    .unwrap_or(snapshot.checkpoint.to_block)
-            }
-        })
-    });
+    let from_block = sync_start_block(input.from_block, previous.as_ref(), input.reset);
     let run = run_replay(ReplayInput {
         manifest: input.manifest.to_path_buf(),
         build_dir: input.build_dir.to_path_buf(),
@@ -2654,6 +2643,26 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         input.reset,
     )?;
     Ok(snapshot)
+}
+
+fn sync_start_block(
+    configured_from_block: Option<u64>,
+    previous: Option<&state::StoreSnapshot>,
+    reset: bool,
+) -> Option<u64> {
+    if reset || previous.is_none() {
+        return configured_from_block;
+    }
+    previous.map(|snapshot| {
+        if snapshot.checkpoint.complete {
+            snapshot.checkpoint.to_block.saturating_add(1)
+        } else {
+            snapshot
+                .checkpoint
+                .from_block
+                .unwrap_or(snapshot.checkpoint.to_block)
+        }
+    })
 }
 
 fn merge_history(
@@ -3314,6 +3323,25 @@ mod tests {
             &test_snapshot(false, 0),
             LogSourceKind::Rpc
         ));
+    }
+
+    #[test]
+    fn sync_start_block_uses_configured_block_only_for_initial_or_reset_sync() {
+        let complete = test_snapshot(true, 0);
+        assert_eq!(sync_start_block(Some(100), None, false), Some(100));
+        assert_eq!(sync_start_block(Some(100), Some(&complete), false), Some(3));
+        assert_eq!(
+            sync_start_block(Some(100), Some(&complete), true),
+            Some(100)
+        );
+
+        let mut incomplete = test_snapshot(false, 0);
+        incomplete.checkpoint.from_block = Some(50);
+        incomplete.checkpoint.to_block = 60;
+        assert_eq!(
+            sync_start_block(Some(100), Some(&incomplete), false),
+            Some(50)
+        );
     }
 
     fn test_snapshot(complete: bool, validation_errors: usize) -> StoreSnapshot {

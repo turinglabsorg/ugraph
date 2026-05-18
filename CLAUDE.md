@@ -84,6 +84,10 @@
 - Sepolia local smoke should prefer `https://sepolia.drpc.org`; the publicnode
   Sepolia endpoint timed out on some `eth_getLogs` calls during dynamic-source
   deploy testing.
+- `UGRAPH_FROM_BLOCK` is the initial deployment start block only. Once a
+  complete checkpoint exists, the watch indexer resumes from
+  `checkpoint.to_block + 1`; use `--reset`/`UGRAPH_RESET=true` for an explicit
+  rebuild from the configured start block.
 - Keep provider wiring out of the core runtime. DigitalOcean is a likely target,
   but the core container should stay portable.
 - Lowest-cost deploy target is now `infra/gcp/e2-micro`: one Google Compute

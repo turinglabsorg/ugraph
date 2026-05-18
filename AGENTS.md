@@ -63,7 +63,10 @@
   entities, dynamic sources, and processed-log cursors.
 - `core sync --watch` is the live indexer loop. It repeats the current-state
   sync pass after `UGRAPH_POLL_INTERVAL_MS`, logs transient failures as JSON,
-  and retries with capped exponential backoff.
+  and retries with capped exponential backoff. A configured `from_block` is the
+  initial deployment start block only; after a complete checkpoint exists,
+  watch mode must resume from `checkpoint.to_block + 1` unless `--reset` is
+  explicitly used.
 - `core replay/sync` uses a per-run WASM module cache so each distinct mapping
   WASM is compiled once, then instantiated per log. Handler writes run against
   candidate store/cache state and commit only after schema validation passes,
