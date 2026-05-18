@@ -98,11 +98,20 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
             Err(_) => ("503 Service Unavailable", None),
         };
         let metadata = deployment_metadata_for_store(store).ok().flatten();
+        let public_deployments = public_deployments_for_store(store).unwrap_or_default();
+        let sync_activity = sync_activity_for_store(store).unwrap_or_default();
         return write_response(
             &mut stream,
             status,
             "text/html; charset=utf-8",
-            home_html(store, store_status.as_ref(), metadata.as_ref()).as_bytes(),
+            home_html(
+                store,
+                store_status.as_ref(),
+                metadata.as_ref(),
+                &public_deployments,
+                &sync_activity,
+            )
+            .as_bytes(),
         );
     }
     if method == "GET" && path == "/healthz" {
@@ -495,6 +504,29 @@ fn deployment_metadata_for_store(
     }
 }
 
+fn public_deployments_for_store(
+    store: &SnapshotStore,
+) -> anyhow::Result<Vec<storage::DeploymentMetadataRecord>> {
+    match store {
+        SnapshotStore::Postgres { url, .. } => Ok(storage::list_deployment_metadata(url)?
+            .into_iter()
+            .filter(|metadata| metadata.visibility == "public")
+            .collect()),
+        SnapshotStore::Json { .. } => Ok(Vec::new()),
+    }
+}
+
+fn sync_activity_for_store(
+    store: &SnapshotStore,
+) -> anyhow::Result<Vec<storage::SyncBlockActivity>> {
+    match store {
+        SnapshotStore::Postgres { url, deployment } => {
+            storage::recent_sync_activity(url, deployment, 8, 8)
+        }
+        SnapshotStore::Json { .. } => Ok(Vec::new()),
+    }
+}
+
 fn metrics_text(store: &SnapshotStore, status: &StoreStatus) -> String {
     let store = prometheus_label_value(&store.label());
     let complete = usize::from(status.checkpoint.complete);
@@ -563,6 +595,8 @@ fn home_html(
     store: &SnapshotStore,
     status: Option<&StoreStatus>,
     metadata: Option<&storage::DeploymentMetadataRecord>,
+    public_deployments: &[storage::DeploymentMetadataRecord],
+    sync_activity: &[storage::SyncBlockActivity],
 ) -> String {
     let ok = status
         .map(|status| status.checkpoint.complete && status.checkpoint.validation_errors == 0)
@@ -593,17 +627,11 @@ fn home_html(
     let history = status
         .map(|status| status.history_snapshots.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let history_range = status
-        .and_then(|status| {
-            Some(format!(
-                "{}-{}",
-                status.history_earliest_block?, status.history_latest_block?
-            ))
-        })
-        .unwrap_or_else(|| "-".to_string());
     let validation_errors = status
         .map(|status| status.checkpoint.validation_errors.to_string())
         .unwrap_or_else(|| "-".to_string());
+    let public_subgraphs = public_subgraphs_html(public_deployments);
+    let sync_blocks = sync_blocks_html(sync_activity);
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -630,7 +658,7 @@ fn home_html(
     .subtitle {{ margin-top:10px; color:var(--ink); font-size:14px; line-height:1.35; word-break:break-word; }}
     .status {{ display:grid; place-items:center; border-left:3px solid var(--line); padding:12px; color:var(--warn); background:var(--void); font-size:18px; font-weight:700; text-align:center; text-transform:uppercase; }}
     .status.ok {{ color:var(--void); background:var(--acid); }}
-    .grid {{ display:grid; grid-template-columns:1.5fr repeat(5, minmax(0, 1fr)); border-bottom:3px solid var(--line); }}
+    .grid {{ display:grid; grid-template-columns:1.6fr repeat(4, minmax(0, 1fr)); border-bottom:3px solid var(--line); }}
     .metric {{ min-width:0; padding:13px 12px 12px; border-right:3px solid var(--line); background:var(--void); }}
     .metric:nth-child(odd) {{ background:#101010; }}
     .metric:last-child {{ border-right:0; }}
@@ -650,12 +678,33 @@ fn home_html(
     .ok-text {{ color:var(--acid); font-weight:700; }}
     .warn-text {{ color:var(--warn); font-weight:700; }}
     .hash {{ color:#c8c1ad; }}
+    .section {{ border-top:3px solid var(--line); }}
+    .section-title {{ padding:8px 12px; background:var(--paper); color:var(--void); font-size:12px; font-weight:700; text-transform:uppercase; }}
+    .subgraph-row {{ display:grid; grid-template-columns:1.1fr .7fr 1fr 1.7fr; gap:0; border-top:3px solid var(--line); }}
+    .subgraph-cell {{ min-width:0; padding:12px; border-right:3px solid var(--line); }}
+    .subgraph-cell:last-child {{ border-right:0; }}
+    .subgraph-name {{ color:var(--acid); font-size:18px; font-weight:700; }}
+    .subgraph-label {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; }}
+    .sync-row {{ display:grid; grid-template-columns:170px minmax(0, 1fr); border-top:3px solid var(--line); }}
+    .sync-block {{ padding:12px; border-right:3px solid var(--line); background:#101010; color:var(--acid); font-size:20px; font-weight:700; }}
+    .sync-detail {{ min-width:0; padding:12px; }}
+    .sync-counts {{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }}
+    .sync-count {{ border:2px solid var(--line); padding:5px 7px; font-size:12px; font-weight:700; text-transform:uppercase; }}
+    .sync-count.created {{ background:var(--acid); color:var(--void); }}
+    .sync-count.updated {{ background:var(--blue); color:var(--void); }}
+    .sync-count.removed {{ background:var(--hot); color:var(--void); }}
+    .changes {{ display:flex; flex-wrap:wrap; gap:7px; }}
+    .change {{ max-width:100%; display:inline-flex; align-items:center; gap:7px; border:1px solid rgba(243,240,230,.36); padding:5px 7px; font-size:12px; }}
+    .change b {{ flex:0 0 auto; color:var(--muted); text-transform:uppercase; }}
+    .change code {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .change.created b {{ color:var(--acid); }}
+    .change.updated b {{ color:var(--blue); }}
+    .change.removed b {{ color:var(--hot); }}
+    .empty-row {{ padding:14px 12px; border-top:3px solid var(--line); color:var(--muted); font-size:13px; font-weight:700; text-transform:uppercase; }}
     .footer {{ display:flex; flex-wrap:wrap; align-items:center; gap:0; border-top:3px solid var(--line); background:var(--void); }}
     .button {{ display:inline-flex; align-items:center; justify-content:center; min-height:46px; padding:10px 14px; border-right:3px solid var(--line); background:var(--void); color:var(--ink); text-decoration:none; font-size:13px; font-weight:700; text-transform:uppercase; }}
     .button:hover {{ background:var(--paper); color:var(--void); }}
-    .credit {{ margin-left:auto; min-height:46px; padding:12px 14px; color:var(--void); background:var(--blue); border-left:3px solid var(--line); font-size:13px; font-weight:700; text-decoration:none; text-transform:lowercase; }}
-    .credit:hover {{ background:var(--acid); color:var(--void); }}
-    @media (max-width: 900px) {{ body::after {{ display:none; }} .shell {{ box-shadow:7px 7px 0 var(--acid); }} .topbar {{ flex-direction:column; }} header {{ grid-template-columns:86px 1fr; }} .mark {{ min-height:96px; font-size:25px; }} .brand {{ padding:13px; }} h1 {{ font-size:42px; }} .status {{ grid-column:1 / -1; border-left:0; border-top:3px solid var(--line); min-height:54px; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:3px solid var(--line); }} .metric:nth-child(2n) {{ border-right:0; }} .metric:first-child .value, .value {{ font-size:24px; }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:3px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} .footer {{ display:grid; grid-template-columns:1fr; }} .button, .credit {{ margin-left:0; border-right:0; border-left:0; border-bottom:3px solid var(--line); width:100%; justify-content:flex-start; }} .credit {{ border-bottom:0; }} }}
+    @media (max-width: 900px) {{ body::after {{ display:none; }} .shell {{ box-shadow:7px 7px 0 var(--acid); }} .topbar {{ flex-direction:column; }} header {{ grid-template-columns:86px 1fr; }} .mark {{ min-height:96px; font-size:25px; }} .brand {{ padding:13px; }} h1 {{ font-size:42px; }} .status {{ grid-column:1 / -1; border-left:0; border-top:3px solid var(--line); min-height:54px; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:3px solid var(--line); }} .metric:nth-child(2n) {{ border-right:0; }} .metric:first-child .value, .value {{ font-size:24px; }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:3px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} .subgraph-row {{ grid-template-columns:1fr; }} .subgraph-cell {{ border-right:0; border-bottom:3px solid var(--line); }} .subgraph-cell:last-child {{ border-bottom:0; }} .sync-row {{ grid-template-columns:1fr; }} .sync-block {{ border-right:0; border-bottom:3px solid var(--line); }} .footer {{ display:grid; grid-template-columns:1fr; }} .button {{ margin-left:0; border-right:0; border-left:0; border-bottom:3px solid var(--line); width:100%; justify-content:flex-start; }} }}
   </style>
 </head>
 <body>
@@ -678,7 +727,6 @@ fn home_html(
         <div class="metric"><div class="label">Entities</div><div class="value">{entities}</div></div>
         <div class="metric"><div class="label">Sources</div><div class="value">{dynamic_sources}</div></div>
         <div class="metric"><div class="label">History</div><div class="value">{history}</div></div>
-        <div class="metric"><div class="label">Range</div><div class="value">{history_range}</div></div>
         <div class="metric"><div class="label">Errors</div><div class="value">{validation_errors}</div></div>
       </section>
       <section class="content">
@@ -695,18 +743,25 @@ fn home_html(
         <div class="panel">
           <ul class="terminal" aria-label="Runtime terminal">
             <li><span class="key">$ runtime</span><span class="{health_class}">{health_text}</span></li>
-            <li><span class="key">$ graph_node</span><span>compatible HTTP envelope</span></li>
-            <li><span class="key">$ goldsky</span><span>versioned path compatible</span></li>
+            <li><span class="key">$ query</span><span>versioned endpoint active</span></li>
+            <li><span class="key">$ api</span><span>public HTTP interface</span></li>
             <li><span class="key">$ refresh</span><span>10 seconds</span></li>
           </ul>
         </div>
+      </section>
+      <section class="section" aria-label="Public subgraphs">
+        <div class="section-title">PUBLIC SUBGRAPHS</div>
+        {public_subgraphs}
+      </section>
+      <section class="section" aria-label="Recent sync blocks">
+        <div class="section-title">SYNC BLOCKS</div>
+        {sync_blocks}
       </section>
       <nav class="footer" aria-label="Service links">
         <a class="button" href="/graphql">GraphiQL</a>
         <a class="button" href="{latest_endpoint}">Latest endpoint</a>
         <a class="button" href="/healthz">Health JSON</a>
         <a class="button" href="/metrics">Metrics</a>
-        <a class="credit" href="https://turinglabs.org" rel="noopener">made by turinglabs_</a>
       </nav>
     </section>
   </main>
@@ -725,8 +780,9 @@ fn home_html(
         entities = entities,
         dynamic_sources = dynamic_sources,
         history = history,
-        history_range = history_range,
         validation_errors = validation_errors,
+        public_subgraphs = public_subgraphs,
+        sync_blocks = sync_blocks,
         health_class = if ok { "ok-text" } else { "warn-text" },
         health_text = if ok {
             "sync complete"
@@ -734,6 +790,93 @@ fn home_html(
             "attention required"
         }
     )
+}
+
+fn public_subgraphs_html(rows: &[storage::DeploymentMetadataRecord]) -> String {
+    if rows.is_empty() {
+        return r#"<div class="empty-row">no public subgraphs</div>"#.to_string();
+    }
+    rows.iter()
+        .map(|metadata| {
+            let version = metadata.version_label.as_deref().unwrap_or("latest");
+            let endpoint = format!("/subgraphs/{}/{version}/gn", metadata.deployment);
+            let deployed_by = metadata
+                .owner_email
+                .clone()
+                .or_else(|| {
+                    metadata
+                        .created_by_key_prefix
+                        .as_ref()
+                        .map(|prefix| format!("key:{prefix}"))
+                })
+                .unwrap_or_else(|| "unassigned".to_string());
+            format!(
+                concat!(
+                    r#"<article class="subgraph-row">"#,
+                    r#"<div class="subgraph-cell"><span class="subgraph-label">name</span><div class="subgraph-name">{name}</div></div>"#,
+                    r#"<div class="subgraph-cell"><span class="subgraph-label">version</span><code>{version}</code></div>"#,
+                    r#"<div class="subgraph-cell"><span class="subgraph-label">deployed by</span><code>{deployed_by}</code></div>"#,
+                    r#"<div class="subgraph-cell"><span class="subgraph-label">endpoint</span><a href="{endpoint}">{endpoint}</a></div>"#,
+                    r#"</article>"#
+                ),
+                name = html_escape(&metadata.deployment),
+                version = html_escape(version),
+                deployed_by = html_escape(&deployed_by),
+                endpoint = html_escape(&endpoint)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn sync_blocks_html(rows: &[storage::SyncBlockActivity]) -> String {
+    if rows.is_empty() {
+        return r#"<div class="empty-row">no retained sync activity</div>"#.to_string();
+    }
+    rows.iter()
+        .map(|activity| {
+            let changes = if activity.changes.is_empty() {
+                r#"<span class="change"><b>idle</b><code>no entity changes</code></span>"#
+                    .to_string()
+            } else {
+                activity
+                    .changes
+                    .iter()
+                    .map(|change| {
+                        let action = change.action.as_str();
+                        let target = format!("{}:{}", change.entity, change.id);
+                        format!(
+                            r#"<span class="change {action}"><b>{action}</b><code>{target}</code></span>"#,
+                            action = html_escape(action),
+                            target = html_escape(&target)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            };
+            format!(
+                concat!(
+                    r#"<article class="sync-row">"#,
+                    r#"<div class="sync-block">#{block}</div>"#,
+                    r#"<div class="sync-detail">"#,
+                    r#"<div class="sync-counts">"#,
+                    r#"<span class="sync-count created">created {created}</span>"#,
+                    r#"<span class="sync-count updated">updated {updated}</span>"#,
+                    r#"<span class="sync-count removed">removed {removed}</span>"#,
+                    r#"</div>"#,
+                    r#"<div class="changes">{changes}</div>"#,
+                    r#"</div>"#,
+                    r#"</article>"#
+                ),
+                block = activity.block_number,
+                created = activity.created,
+                updated = activity.updated,
+                removed = activity.removed,
+                changes = changes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn html_escape(value: &str) -> String {
@@ -858,6 +1001,27 @@ fn graphiql_html(endpoint: &str) -> String {
     <script>
       const endpoint = __UGRAPH_ENDPOINT_JSON__;
       const defaultQuery = '{\n  _meta { block { number hash } hasIndexingErrors }\n}';
+      const memoryStorage = {
+        getItem: () => null,
+        setItem: () => undefined,
+        removeItem: () => undefined,
+        clear: () => undefined,
+        key: () => null,
+        get length() { return 0; }
+      };
+
+      function resetBrokenCachedQuery() {
+        try {
+          const storage = window.localStorage;
+          if (!storage) return;
+          const cached = storage.getItem('graphiql:query');
+          const trimmed = cached && cached.trim();
+          const looksLikeGraphQL = trimmed && /^(query|mutation|subscription|fragment|\{)/.test(trimmed);
+          if (trimmed && !looksLikeGraphQL) {
+            storage.setItem('graphiql:query', defaultQuery);
+          }
+        } catch (_) {}
+      }
 
       async function graphQLFetcher(graphQLParams) {
         const headers = { 'content-type': 'application/json' };
@@ -915,7 +1079,12 @@ fn graphiql_html(endpoint: &str) -> String {
         if (!window.React || !window.ReactDOM || !window.GraphiQL) {
           mountFallback('GraphiQL assets did not load; using built-in fallback.');
         } else {
-          const element = React.createElement(GraphiQL, { fetcher: graphQLFetcher, defaultQuery });
+          resetBrokenCachedQuery();
+          const element = React.createElement(GraphiQL, {
+            fetcher: graphQLFetcher,
+            defaultQuery,
+            storage: memoryStorage
+          });
           if (ReactDOM.createRoot) {
             ReactDOM.createRoot(document.getElementById('graphiql')).render(element);
           } else {
@@ -990,11 +1159,13 @@ mod tests {
         assert!(html.contains("GraphiQL assets did not load"));
         assert!(html.contains("graphQLFetcher"));
         assert!(html.contains("ugraph_api_key"));
+        assert!(html.contains("memoryStorage"));
+        assert!(html.contains("resetBrokenCachedQuery"));
         assert!(html.contains(r#"const endpoint = "/subgraphs/growfi/latest/gn";"#));
     }
 
     #[test]
-    fn graphql_endpoint_accepts_graph_node_and_goldsky_paths() {
+    fn graphql_endpoint_accepts_hosted_provider_paths() {
         assert_eq!(
             graphql_endpoint("/graphql"),
             Some(GraphqlEndpoint {
@@ -1050,19 +1221,44 @@ mod tests {
             version_label: Some("4.0.2".to_string()),
             visibility: "public".to_string(),
             owner_user_id: None,
-            owner_email: None,
+            owner_email: Some("ops@ugraph.local".to_string()),
             created_by_key_id: None,
             created_by_key_prefix: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
+        let sync_activity = vec![storage::SyncBlockActivity {
+            block_number: 42,
+            created: 1,
+            updated: 2,
+            removed: 0,
+            changes: vec![storage::EntityChangeRecord {
+                entity: "Token".to_string(),
+                id: "0xabc".to_string(),
+                action: storage::EntityChangeAction::Updated,
+            }],
+        }];
 
-        let html = home_html(&store, Some(&status), Some(&metadata));
+        let html = home_html(
+            &store,
+            Some(&status),
+            Some(&metadata),
+            std::slice::from_ref(&metadata),
+            &sync_activity,
+        );
 
         assert!(html.contains("OPERATIONAL"));
         assert!(html.contains("/subgraphs/growfi/4.0.2/gn"));
         assert!(html.contains("/subgraphs/growfi/latest/gn"));
-        assert!(html.contains("versioned path compatible"));
+        assert!(html.contains("PUBLIC SUBGRAPHS"));
+        assert!(html.contains("SYNC BLOCKS"));
+        assert!(html.contains("ops@ugraph.local"));
+        assert!(html.contains("updated"));
+        assert!(html.contains("Token:0xabc"));
+        assert!(!html.contains(">Range<"));
+        assert!(!html.contains("goldsky"));
+        assert!(!html.contains("graph_node"));
+        assert_eq!(html.matches("made by turinglabs_").count(), 1);
         assert!(html.contains("made by turinglabs_"));
         assert!(html.contains("https://turinglabs.org"));
     }

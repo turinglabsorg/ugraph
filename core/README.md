@@ -94,7 +94,9 @@ The image uses the same binary for the API and indexer:
 - `UGRAPH_MODE=serve` exposes `/graphql`, `/`, `/status`, `/healthz`, and
   `/metrics`. It also accepts hosted-provider compatible query paths at
   `/subgraphs/<deployment>/<version>/gn` and
-  `/subgraphs/<deployment>/<version>/graphql`.
+  `/subgraphs/<deployment>/<version>/graphql`. The public status page lists
+  public deployments with their deployer metadata and recent retained sync
+  blocks with created/updated/removed entity deltas.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.
 - `UGRAPH_MODE=chain-reader` reads one `chain_id` from RPC and writes raw logs
   into Postgres for every registered subscription on that chain. If no explicit

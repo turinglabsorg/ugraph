@@ -36,9 +36,12 @@
   forwards normal `ugraph` subcommands such as `deploy`, `chain-reader`, and
   `--help`.
 - The public homepage is served from `/` and `/status` as a brutalist
-  terminal-style status page with a `made by turinglabs_` credit linked to
-  `https://turinglabs.org`. GraphiQL is served from pinned React/GraphiQL
-  assets and includes a built-in fallback query UI if external assets fail.
+  terminal-style status page with a single `made by turinglabs_` credit linked
+  to `https://turinglabs.org`. It lists public deployment metadata and recent
+  retained sync blocks with created/updated/removed entity deltas. GraphiQL is
+  served from pinned React/GraphiQL assets, uses in-memory editor storage to
+  avoid stale browser query state, and includes a built-in fallback query UI if
+  external assets fail.
 - Hosted-provider query paths are supported at
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. `latest` aliases the current

@@ -90,15 +90,19 @@
   queries instead of materializing entity history, so operational checks stay
   responsive while the indexer is writing.
 - `core serve` exposes `/` and `/status` as the public terminal-style
-  operational homepage, plus `/metrics` in Prometheus text format.
+  operational homepage, plus `/metrics` in Prometheus text format. The homepage
+  should list all public deployment metadata for the instance and the recent
+  retained sync blocks for the selected deployment, including
+  created/updated/removed entity deltas per block.
 - `core serve` accepts hosted-provider compatible versioned query paths:
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. The deployment name must match
   the selected `UGRAPH_DEPLOYMENT`, `latest` aliases the current deployment,
   and explicit versions must match the registered deployment metadata.
-- `core serve` serves GraphiQL with pinned React/GraphiQL assets and a built-in
-  fallback query UI if external assets fail. When opened from a versioned path,
-  GraphiQL posts queries back to that same versioned endpoint.
+- `core serve` serves GraphiQL with pinned React/GraphiQL assets, in-memory
+  editor storage to avoid stale browser query state, and a built-in fallback
+  query UI if external assets fail. When opened from a versioned path, GraphiQL
+  posts queries back to that same versioned endpoint.
 - `core conformance` runs batch GraphQL diffs against Goldsky/Graph Node from
   JSON case files. GrowFi cases live in `core/examples/growfi/conformance.json`.
 - `core matrix` is the repeatable compatibility report command. It runs

@@ -98,6 +98,39 @@ pub struct DeploymentMetadataRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct SyncBlockActivity {
+    pub block_number: u64,
+    pub created: usize,
+    pub updated: usize,
+    pub removed: usize,
+    pub changes: Vec<EntityChangeRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntityChangeRecord {
+    pub entity: String,
+    pub id: String,
+    pub action: EntityChangeAction,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum EntityChangeAction {
+    Created,
+    Updated,
+    Removed,
+}
+
+impl EntityChangeAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StoreStatus {
     pub checkpoint: SyncCheckpoint,
     pub entities: usize,
@@ -472,6 +505,86 @@ pub fn list_deployment_metadata(url: &str) -> anyhow::Result<Vec<DeploymentMetad
         .into_iter()
         .map(row_to_deployment_metadata)
         .collect())
+}
+
+pub fn recent_sync_activity(
+    url: &str,
+    deployment: &str,
+    block_limit: usize,
+    entity_limit: usize,
+) -> anyhow::Result<Vec<SyncBlockActivity>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let block_limit = i64::try_from(block_limit).context("block limit overflows postgres")?;
+    let rows = client.query(
+        r#"
+        select
+          h.block_number,
+          v.entity,
+          v.id,
+          v.removed,
+          prev.removed as previous_removed
+        from (
+          select block_number
+          from ugraph_history_snapshots
+          where deployment = $1
+          order by block_number desc
+          limit $2
+        ) h
+        left join ugraph_entity_versions v
+          on v.deployment = $1 and v.block_number = h.block_number
+        left join lateral (
+          select removed
+          from ugraph_entity_versions p
+          where p.deployment = $1
+            and p.entity = v.entity
+            and p.id = v.id
+            and p.block_number < v.block_number
+          order by p.block_number desc
+          limit 1
+        ) prev on v.entity is not null
+        order by h.block_number desc, v.entity nulls last, v.id nulls last
+        "#,
+        &[&deployment, &block_limit],
+    )?;
+    let mut blocks = BTreeMap::<u64, SyncBlockActivity>::new();
+    for row in rows {
+        let block_number: i64 = row.get("block_number");
+        let block_number = u64::try_from(block_number).context("activity block is negative")?;
+        let activity = blocks
+            .entry(block_number)
+            .or_insert_with(|| SyncBlockActivity {
+                block_number,
+                created: 0,
+                updated: 0,
+                removed: 0,
+                changes: Vec::new(),
+            });
+        let Some(entity) = row.get::<_, Option<String>>("entity") else {
+            continue;
+        };
+        let id = row.get::<_, String>("id");
+        let removed = row.get::<_, bool>("removed");
+        let previous_removed = row.get::<_, Option<bool>>("previous_removed");
+        let action = if removed {
+            EntityChangeAction::Removed
+        } else if previous_removed == Some(false) {
+            EntityChangeAction::Updated
+        } else {
+            EntityChangeAction::Created
+        };
+        match action {
+            EntityChangeAction::Created => activity.created += 1,
+            EntityChangeAction::Updated => activity.updated += 1,
+            EntityChangeAction::Removed => activity.removed += 1,
+        }
+        if activity.changes.len() < entity_limit {
+            activity
+                .changes
+                .push(EntityChangeRecord { entity, id, action });
+        }
+    }
+    Ok(blocks.into_values().rev().collect())
 }
 
 pub fn deployment_metadata(
@@ -1803,7 +1916,7 @@ mod tests {
     use ugraph_core::{
         EntityField, EntitySchema, EntityType, EventTriggerPlan, RawEthereumLog, SourcePlan,
     };
-    use ugraph_runtime::StoreValue;
+    use ugraph_runtime::{EntityData, StoreValue};
 
     use super::*;
 
@@ -1870,6 +1983,59 @@ mod tests {
         assert_eq!(loaded.entities[0].entity, "Protocol");
         assert_eq!(loaded.dynamic_sources.len(), 1);
         assert_eq!(loaded.history.len(), snapshot.history.len());
+        cleanup(&url, &deployment)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recent_sync_activity_reports_entity_changes_when_url_is_set() -> anyhow::Result<()> {
+        let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
+            return Ok(());
+        };
+        let deployment = format!("ugraph_activity_test_{}", std::process::id());
+        let store = SnapshotStore::Postgres {
+            url: url.clone(),
+            deployment: deployment.clone(),
+        };
+        let mut snapshot = fixture_snapshot();
+        snapshot.history = vec![
+            HistoricalSnapshot {
+                checkpoint: fixture_checkpoint(1),
+                entities: vec![fixture_entity("Protocol", "main", "0x01")],
+                dynamic_sources: Vec::new(),
+            },
+            HistoricalSnapshot {
+                checkpoint: fixture_checkpoint(2),
+                entities: vec![
+                    fixture_entity("Protocol", "main", "0x02"),
+                    fixture_entity("Protocol", "side", "0x10"),
+                ],
+                dynamic_sources: Vec::new(),
+            },
+            HistoricalSnapshot {
+                checkpoint: fixture_checkpoint(3),
+                entities: vec![fixture_entity("Protocol", "side", "0x11")],
+                dynamic_sources: Vec::new(),
+            },
+        ];
+        store.write(&snapshot)?;
+
+        let activity = recent_sync_activity(&url, &deployment, 3, 10)?;
+
+        assert_eq!(activity.len(), 3);
+        assert_eq!(activity[0].block_number, 3);
+        assert_eq!(activity[0].updated, 1);
+        assert_eq!(activity[0].removed, 1);
+        assert!(activity[0]
+            .changes
+            .iter()
+            .any(|change| { change.id == "main" && change.action == EntityChangeAction::Removed }));
+        assert_eq!(activity[1].block_number, 2);
+        assert_eq!(activity[1].created, 1);
+        assert_eq!(activity[1].updated, 1);
+        assert_eq!(activity[2].block_number, 1);
+        assert_eq!(activity[2].created, 1);
+
         cleanup(&url, &deployment)?;
         Ok(())
     }
@@ -2053,6 +2219,28 @@ mod tests {
             transaction_hash: Some("0xtx".to_string()),
             transaction_index: Some("0x0".to_string()),
             log_index: Some("0x0".to_string()),
+        }
+    }
+
+    fn fixture_checkpoint(block: u64) -> SyncCheckpoint {
+        SyncCheckpoint {
+            from_block: Some(block),
+            to_block: block,
+            block_hash: Some(format!("0xblock{block}")),
+            scanned_logs: 1,
+            executed_logs: 1,
+            validation_errors: 0,
+            complete: true,
+        }
+    }
+
+    fn fixture_entity(entity: &str, id: &str, value: &str) -> EntitySnapshot {
+        let mut data = EntityData::new();
+        data.insert("id".to_string(), StoreValue::Bytes(value.to_string()));
+        EntitySnapshot {
+            entity: entity.to_string(),
+            id: id.to_string(),
+            data,
         }
     }
 
