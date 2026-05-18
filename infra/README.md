@@ -5,11 +5,32 @@ This layer will package and run `core` online.
 Initial target:
 
 - Docker image for local and cloud execution.
-- Cloud Run service for the API/query process.
-- Managed Postgres for the canonical entity store.
+- Shared Postgres for the raw chain feed and deployment entity stores.
+- One chain reader per `chain_id`.
+- Deployment-specific sync workers/jobs that consume the shared feed.
+- API/query process per deployment.
 - GraphQL endpoint plus GraphiQL UI.
 
 Redis is intentionally out of scope for the first deployment path.
+
+## Deployment Model
+
+The infra layer should hide provider wiring behind one CLI command. Operators
+should not manually assemble Cloud Run services, jobs, schedulers, secrets, and
+database tables for every subgraph.
+
+The target shape is:
+
+- `chain-reader:<chain-id>` reads RPC once and writes raw blocks/logs to
+  Postgres.
+- `sync:<deployment>` consumes raw logs from Postgres and writes entities under
+  that deployment id.
+- `api:<deployment>` serves GraphQL/GraphiQL from the deployment store.
+
+This lets many subgraphs and versions share one chain reader and one Postgres
+instance while keeping entity data isolated by deployment id. A deployment can
+subscribe to more than one `chain-reader:<chain-id>` when the subgraph spans
+multiple chains.
 
 ## Local Postgres
 

@@ -100,6 +100,15 @@ The image uses the same binary for the API and indexer:
 The API reloads the selected store on each GraphQL request, so writes committed
 by the indexer are visible without restarting the server.
 
+Production should evolve toward a shared chain feed. Instead of every subgraph
+deployment calling `eth_getLogs` for the same chain, one `chain-reader` per
+`chain_id` should write raw block/log data into Postgres. Deployment-specific
+sync jobs then consume matching raw logs from that feed and write entities
+under their own `UGRAPH_DEPLOYMENT` ids. A deployment can subscribe to multiple
+`chain_id` values, with chain-scoped cursors and raw feed data. This keeps
+multi-subgraph deployments cheap without turning the runtime into one heavy
+multi-subgraph process.
+
 ## Current Scope
 
 The first milestone is compatibility plumbing:

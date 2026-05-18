@@ -41,6 +41,62 @@ Each sync pass scans from each data source cursor to a target block.
 This mirrors hosted subgraph semantics while keeping the operational footprint
 small enough for serverless or cron-style execution.
 
+## Shared Chain Feed
+
+Production indexing should not make every subgraph deployment read the same
+chain independently. The low-cost production model is a shared multi-chain
+feed:
+
+1. One `chain-reader` per `chain_id`/RPC reads blocks and logs in canonical
+   order.
+2. The reader writes raw block metadata and raw logs into append-only Postgres
+   tables keyed by `chain_id`, `block_number`, `block_hash`,
+   `transaction_index`, and `log_index`.
+3. Subgraph sync jobs read matching raw logs from that local feed using the
+   manifest's addresses, topics, and dynamic data source subscriptions.
+4. Mapping WASM execution and entity writes stay isolated by `deployment`.
+5. The GraphQL API reads only the entity store for its deployment.
+
+This means one RPC reader can serve many subgraphs and many versions on the
+same chain, while separate readers can serve other chains in the same Postgres
+instance. It also creates a natural cache for retries, reorg checks, and
+backfills: replaying a subgraph should not require re-fetching logs that the
+chain reader has already persisted.
+
+Multi-chain subgraphs are represented as multiple subscriptions under one
+deployment. Each subscription points to a `chain_id` and a manifest data source
+or dynamic source. Entity writes remain scoped by deployment, while raw chain
+data remains scoped by chain.
+
+The first implementation can keep the feed inside Postgres to avoid operating
+Kafka, Pub/Sub, Redis, or another queue. Later, the same boundary can be backed
+by a streaming system if throughput requires it. The contract between reader
+and sync jobs is raw chain data, not decoded entity changes.
+
+Target CLI flow:
+
+```bash
+ugraph deploy \
+  --provider gcloud \
+  --deployment growfi-v1 \
+  --chain-id 11155111 \
+  --manifest subgraph.yaml \
+  --postgres-url <url> \
+  --rpc-url <rpc>
+```
+
+The deploy command should:
+
+- Create or reuse the shared Postgres database.
+- Ensure a `chain-reader` exists for every requested `chain_id`.
+- Register the subgraph deployment and its static subscriptions.
+- Build/publish the container image when needed.
+- Start or schedule sync workers for that deployment.
+- Expose the GraphQL/GraphiQL API for that deployment.
+
+The operator should not have to manually wire Cloud Run services, jobs,
+schedulers, or database tables.
+
 ## Query Model
 
 The endpoint accepts normal GraphQL request envelopes:
@@ -88,6 +144,12 @@ The core ships a single Docker image. `UGRAPH_MODE=serve` runs the API, and
 used on a local Docker host, DigitalOcean App Platform, or any container
 runtime. `docker-compose.yml` is the local production-shaped smoke with
 Postgres, indexer, and API.
+
+For the shared-feed model, the same image should grow a third mode:
+`UGRAPH_MODE=chain-reader`. That process owns RPC polling for one `chain_id`
+and writes raw blocks/logs to Postgres. Run one reader per `chain_id`.
+`UGRAPH_MODE=indexer` then consumes local raw logs instead of calling RPC
+directly when `UGRAPH_LOG_SOURCE=postgres-feed` is configured.
 
 The API reloads the selected store for each GraphQL request. This keeps the
 server simple and makes indexer writes visible immediately after the Postgres

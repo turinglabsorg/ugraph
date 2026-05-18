@@ -8,6 +8,32 @@
 The storage target is Postgres. SQLite can be used for local development and
 tests. Redis is out of scope for now.
 
+## Production Shape
+
+Production should use a shared multi-chain feed, not one RPC scanner per
+subgraph:
+
+- One `chain-reader` per `chain_id` reads raw blocks/logs from that chain's
+  RPC.
+- The reader stores raw chain data in Postgres.
+- Each subgraph deployment consumes matching raw logs from that feed and writes
+  its own entity store under a separate deployment id.
+- Multiple subgraphs and versions can share the same Postgres instance.
+  Deployments on the same chain share a reader; deployments on different chains
+  use separate readers keyed by `chain_id`.
+- Multi-chain subgraphs are represented as one deployment with multiple
+  chain-scoped subscriptions.
+
+The intended operator flow is a single CLI command such as:
+
+```bash
+ugraph deploy --provider gcloud --deployment growfi-v1 --chain-id 11155111 --manifest subgraph.yaml
+```
+
+That command should create or reuse the shared infrastructure, ensure readers
+exist for the required chains, register the deployment, run sync, and expose
+GraphQL/GraphiQL.
+
 ## Core
 
 ```bash

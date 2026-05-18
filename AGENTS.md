@@ -164,3 +164,15 @@
 - Build container-first. A single Docker image should run locally and deploy cleanly to any container host.
 - DigitalOcean with managed Postgres is a likely target; do not bake in Cloud Run assumptions.
 - Keep `core` runnable without cloud services for local compatibility tests.
+- Production should use a shared multi-chain feed: one `chain-reader` per
+  `chain_id` reads RPC once and stores raw blocks/logs in Postgres;
+  deployment-specific sync workers consume matching raw logs from that feed and
+  write isolated entity stores under separate `UGRAPH_DEPLOYMENT` ids.
+- A deployment may subscribe to multiple `chain_id` values. Keep every raw feed
+  table, cursor, subscription, and entity write scoped by chain/deployment where
+  appropriate.
+- The deploy UX should be a single CLI call (`ugraph deploy ...`) that creates
+  or reuses shared infrastructure, ensures the required chain readers exist,
+  registers the subgraph deployment, runs sync, and exposes GraphQL/GraphiQL.
+  Avoid making operators manually wire Cloud Run services/jobs/schedulers per
+  subgraph.
