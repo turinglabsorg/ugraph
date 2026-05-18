@@ -613,46 +613,58 @@ fn home_html(
   <meta http-equiv="refresh" content="10">
   <title>UGraph Status</title>
   <style>
-    :root {{ color-scheme: dark; --bg:#11100e; --ink:#f7f1df; --muted:#a9a08d; --line:#3a352c; --panel:#181611; --panel-2:#211e18; --ok:#46f08c; --warn:#ffb84a; --red:#ff5f56; }}
+    :root {{ color-scheme: dark; --bg:#050505; --ink:#f3f0e6; --paper:#f3f0e6; --void:#050505; --muted:#8d887d; --line:#f3f0e6; --acid:#c8ff00; --hot:#ff3b30; --blue:#38a3ff; --warn:#ffb000; }}
     * {{ box-sizing: border-box; }}
     html {{ min-height:100%; background:var(--bg); }}
-    body {{ margin:0; min-height:100vh; background:linear-gradient(180deg, #11100e 0%, #17140f 100%); color:var(--ink); font-family:"Courier New", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:0; }}
-    body::before {{ content:""; position:fixed; inset:0; pointer-events:none; opacity:.18; background-image:linear-gradient(rgba(247,241,223,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(247,241,223,.06) 1px, transparent 1px); background-size:28px 28px; }}
-    main {{ width:min(1120px, calc(100% - 32px)); margin:0 auto; padding:28px 0 36px; position:relative; }}
-    .shell {{ border:2px solid var(--line); background:rgba(24,22,17,.94); box-shadow:8px 8px 0 #050504; }}
-    header {{ display:grid; grid-template-columns:auto 1fr auto; gap:18px; align-items:center; padding:18px; border-bottom:2px solid var(--line); background:var(--panel-2); }}
-    .mark {{ width:68px; height:68px; display:grid; place-items:center; border:2px solid var(--ink); background:#0c0b09; box-shadow:4px 4px 0 var(--warn); font-size:22px; font-weight:700; line-height:1; }}
-    .brand {{ min-width:0; }}
-    h1 {{ margin:0; font-size:30px; line-height:1.05; font-weight:700; letter-spacing:0; text-transform:uppercase; }}
-    .subtitle {{ margin-top:6px; color:var(--muted); font-size:13px; line-height:1.35; word-break:break-word; }}
-    .status {{ justify-self:end; border:2px solid currentColor; padding:10px 12px; font-size:13px; font-weight:700; color:var(--warn); background:#0c0b09; min-width:132px; text-align:center; }}
-    .status.ok {{ color:var(--ok); }}
-    .grid {{ display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); border-bottom:2px solid var(--line); }}
-    .metric {{ min-width:0; padding:16px; border-right:2px solid var(--line); background:var(--panel); }}
+    body {{ margin:0; min-height:100vh; background:var(--bg); color:var(--ink); font-family:"Courier New", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:0; }}
+    body::before {{ content:""; position:fixed; inset:0; pointer-events:none; opacity:.22; background-image:repeating-linear-gradient(0deg, rgba(243,240,230,.18) 0 1px, transparent 1px 24px), repeating-linear-gradient(90deg, rgba(243,240,230,.12) 0 1px, transparent 1px 24px); }}
+    body::after {{ content:"UGRAPH // LIVE"; position:fixed; right:-58px; top:46%; transform:rotate(90deg); color:rgba(243,240,230,.22); font-size:12px; font-weight:700; pointer-events:none; }}
+    main {{ width:min(1280px, calc(100% - 28px)); margin:0 auto; padding:18px 0 28px; position:relative; }}
+    .shell {{ border:3px solid var(--line); background:var(--void); box-shadow:12px 12px 0 var(--acid); }}
+    .topbar {{ display:flex; justify-content:space-between; gap:12px; padding:8px 12px; border-bottom:3px solid var(--line); background:var(--paper); color:var(--void); font-size:12px; font-weight:700; text-transform:uppercase; }}
+    .maker {{ color:var(--void); text-decoration:none; border-bottom:2px solid var(--void); white-space:nowrap; }}
+    header {{ display:grid; grid-template-columns:130px minmax(0, 1fr) 190px; align-items:stretch; border-bottom:3px solid var(--line); }}
+    .mark {{ display:grid; place-items:center; min-height:132px; border-right:3px solid var(--line); background:var(--hot); color:var(--void); font-size:34px; font-weight:700; line-height:1; }}
+    .brand {{ min-width:0; padding:16px 18px 14px; }}
+    h1 {{ margin:0; font-size:72px; line-height:.9; font-weight:700; letter-spacing:0; text-transform:uppercase; }}
+    .subtitle {{ margin-top:10px; color:var(--ink); font-size:14px; line-height:1.35; word-break:break-word; }}
+    .status {{ display:grid; place-items:center; border-left:3px solid var(--line); padding:12px; color:var(--warn); background:var(--void); font-size:18px; font-weight:700; text-align:center; text-transform:uppercase; }}
+    .status.ok {{ color:var(--void); background:var(--acid); }}
+    .grid {{ display:grid; grid-template-columns:1.5fr repeat(5, minmax(0, 1fr)); border-bottom:3px solid var(--line); }}
+    .metric {{ min-width:0; padding:13px 12px 12px; border-right:3px solid var(--line); background:var(--void); }}
+    .metric:nth-child(odd) {{ background:#101010; }}
     .metric:last-child {{ border-right:0; }}
-    .label {{ color:var(--muted); font-size:11px; text-transform:uppercase; }}
-    .value {{ margin-top:10px; font-size:20px; line-height:1.05; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-    .content {{ display:grid; grid-template-columns:1.2fr .8fr; gap:0; }}
-    .panel {{ padding:18px; border-right:2px solid var(--line); min-width:0; }}
+    .label {{ color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; }}
+    .value {{ margin-top:8px; font-size:28px; line-height:1; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .metric:first-child .value {{ color:var(--acid); font-size:34px; }}
+    .content {{ display:grid; grid-template-columns:1.35fr .65fr; }}
+    .panel {{ padding:16px; border-right:3px solid var(--line); min-width:0; }}
     .panel:last-child {{ border-right:0; }}
-    .prompt {{ color:var(--ok); }}
-    .terminal {{ margin:0; padding:0; list-style:none; display:grid; gap:10px; font-size:13px; line-height:1.45; }}
-    .terminal li {{ display:grid; grid-template-columns:120px minmax(0,1fr); gap:12px; align-items:start; }}
-    .key {{ color:var(--muted); text-transform:uppercase; }}
+    .terminal {{ margin:0; padding:0; list-style:none; display:grid; gap:0; font-size:14px; line-height:1.35; }}
+    .terminal li {{ display:grid; grid-template-columns:140px minmax(0,1fr); gap:12px; align-items:start; padding:9px 0; border-bottom:1px solid rgba(243,240,230,.28); }}
+    .terminal li:last-child {{ border-bottom:0; }}
+    .key {{ color:var(--acid); font-weight:700; text-transform:uppercase; }}
     code, a {{ color:var(--ink); word-break:break-all; }}
-    a {{ text-decoration-thickness:1px; text-underline-offset:3px; }}
-    .ok-text {{ color:var(--ok); }}
-    .warn-text {{ color:var(--warn); }}
-    .hash {{ color:var(--muted); }}
-    .footer {{ display:flex; flex-wrap:wrap; gap:10px; padding:14px 18px; border-top:2px solid var(--line); background:#0c0b09; }}
-    .button {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 12px; border:2px solid var(--line); background:var(--panel); color:var(--ink); text-decoration:none; font-size:13px; }}
-    .button:hover {{ border-color:var(--ink); }}
-    @media (max-width: 860px) {{ header {{ grid-template-columns:auto 1fr; }} .status {{ grid-column:1 / -1; justify-self:stretch; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:2px solid var(--line); }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:2px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} }}
+    a {{ text-decoration-thickness:2px; text-underline-offset:3px; }}
+    a:hover {{ color:var(--acid); }}
+    .ok-text {{ color:var(--acid); font-weight:700; }}
+    .warn-text {{ color:var(--warn); font-weight:700; }}
+    .hash {{ color:#c8c1ad; }}
+    .footer {{ display:flex; flex-wrap:wrap; align-items:center; gap:0; border-top:3px solid var(--line); background:var(--void); }}
+    .button {{ display:inline-flex; align-items:center; justify-content:center; min-height:46px; padding:10px 14px; border-right:3px solid var(--line); background:var(--void); color:var(--ink); text-decoration:none; font-size:13px; font-weight:700; text-transform:uppercase; }}
+    .button:hover {{ background:var(--paper); color:var(--void); }}
+    .credit {{ margin-left:auto; min-height:46px; padding:12px 14px; color:var(--void); background:var(--blue); border-left:3px solid var(--line); font-size:13px; font-weight:700; text-decoration:none; text-transform:lowercase; }}
+    .credit:hover {{ background:var(--acid); color:var(--void); }}
+    @media (max-width: 900px) {{ body::after {{ display:none; }} .shell {{ box-shadow:7px 7px 0 var(--acid); }} .topbar {{ flex-direction:column; }} header {{ grid-template-columns:86px 1fr; }} .mark {{ min-height:96px; font-size:25px; }} .brand {{ padding:13px; }} h1 {{ font-size:42px; }} .status {{ grid-column:1 / -1; border-left:0; border-top:3px solid var(--line); min-height:54px; }} .grid {{ grid-template-columns:1fr 1fr; }} .metric {{ border-bottom:3px solid var(--line); }} .metric:nth-child(2n) {{ border-right:0; }} .metric:first-child .value, .value {{ font-size:24px; }} .content {{ grid-template-columns:1fr; }} .panel {{ border-right:0; border-bottom:3px solid var(--line); }} .terminal li {{ grid-template-columns:1fr; gap:4px; }} .footer {{ display:grid; grid-template-columns:1fr; }} .button, .credit {{ margin-left:0; border-right:0; border-left:0; border-bottom:3px solid var(--line); width:100%; justify-content:flex-start; }} .credit {{ border-bottom:0; }} }}
   </style>
 </head>
 <body>
   <main>
     <section class="shell" aria-label="UGraph service status">
+      <div class="topbar">
+        <span>self-hosted subgraph runtime // public status</span>
+        <a class="maker" href="https://turinglabs.org" rel="noopener">made by turinglabs_</a>
+      </div>
       <header>
         <div class="mark" aria-label="UGraph logo">UG</div>
         <div class="brand">
@@ -694,6 +706,7 @@ fn home_html(
         <a class="button" href="{latest_endpoint}">Latest endpoint</a>
         <a class="button" href="/healthz">Health JSON</a>
         <a class="button" href="/metrics">Metrics</a>
+        <a class="credit" href="https://turinglabs.org" rel="noopener">made by turinglabs_</a>
       </nav>
     </section>
   </main>
@@ -1050,6 +1063,8 @@ mod tests {
         assert!(html.contains("/subgraphs/growfi/4.0.2/gn"));
         assert!(html.contains("/subgraphs/growfi/latest/gn"));
         assert!(html.contains("versioned path compatible"));
+        assert!(html.contains("made by turinglabs_"));
+        assert!(html.contains("https://turinglabs.org"));
     }
 
     #[test]

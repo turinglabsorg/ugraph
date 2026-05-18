@@ -35,9 +35,10 @@
 - Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also
   forwards normal `ugraph` subcommands such as `deploy`, `chain-reader`, and
   `--help`.
-- The public homepage is served from `/` and `/status` as a terminal-style
-  status page. GraphiQL is served from pinned React/GraphiQL assets and
-  includes a built-in fallback query UI if external assets fail.
+- The public homepage is served from `/` and `/status` as a brutalist
+  terminal-style status page with a `made by turinglabs_` credit linked to
+  `https://turinglabs.org`. GraphiQL is served from pinned React/GraphiQL
+  assets and includes a built-in fallback query UI if external assets fail.
 - Hosted-provider query paths are supported at
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. `latest` aliases the current
