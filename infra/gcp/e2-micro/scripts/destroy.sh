@@ -15,7 +15,7 @@ if [ ! -x "$GCLOUD" ]; then
 fi
 
 if [ "${UGRAPH_DESTROY_CONFIRM:-}" != "delete" ]; then
-  echo "Set UGRAPH_DESTROY_CONFIRM=delete to delete ${VM_NAME} and firewall rule ${FIREWALL_RULE}." >&2
+  echo "Set UGRAPH_DESTROY_CONFIRM=delete to delete ${VM_NAME}, ${WEB_FIREWALL_RULE}, ${SSH_FIREWALL_RULE}, ${SUBNET_NAME}, and ${NETWORK_NAME}." >&2
   exit 2
 fi
 
