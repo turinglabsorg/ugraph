@@ -217,7 +217,8 @@ The first milestone is compatibility plumbing:
   The query endpoint supports POST/GET `/graphql`, Graph Node/Goldsky-style
   versioned paths, CORS preflight, `operationName`, variables, `where`, nested
   relations, `@derivedFrom`, ordering, pagination, named fragments, inline
-  fragments, `@include`, `@skip`, `_meta`, and generated schema introspection.
+  fragments, `@include`, `@skip`, `_meta`, generated schema introspection, and
+  Graph Node-style errors for unknown selected fields.
 - Run batch hosted-provider diffs through `conformance` using JSON case files.
 - Run `matrix` as the repeatable compatibility gate. It emits one report that
   combines structural `doctor`, optional bounded sync, and optional hosted

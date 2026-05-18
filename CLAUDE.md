@@ -42,6 +42,8 @@
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. `latest` aliases the current
   deployment; explicit versions must match registered deployment metadata.
+- GraphQL selection validation now rejects unknown entity/meta fields instead
+  of projecting them as `null`, matching Graph Node/Goldsky error behavior.
 - RPC, Chainlist registry, and mapping `ethereum.call` requests are bounded by
   `UGRAPH_RPC_TIMEOUT_SECS`.
 - When no explicit RPC is configured, `chain-reader` tries all resolved

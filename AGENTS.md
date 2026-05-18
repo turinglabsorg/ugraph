@@ -50,8 +50,9 @@
   `operationName`, variables, `_meta.block.number`, `hasIndexingErrors`,
   entity lookup, plural lists, `where`, nested direct relations,
   `@derivedFrom`, ordering, pagination, named fragments, inline fragments,
-  `@include`, `@skip`, scalar output, `_meta.block.hash` for current snapshots,
-  and generated schema introspection for entity/filter/meta types.
+  `@include`, `@skip`, scalar output, Graph Node-style errors for unknown
+  selected fields, `_meta.block.hash` for current snapshots, and generated
+  schema introspection for entity/filter/meta types.
 - `core serve` supports retained historical current-state selection through
   root `block: { number }` and `block: { hash }` arguments.
 - `core sync`, `core serve`, and `core compare` support both JSON snapshots and

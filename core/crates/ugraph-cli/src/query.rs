@@ -99,6 +99,7 @@ fn execute_query(
     let fragments = extract_fragments(&query)?;
     let body = operation_body(&query, operation_name)?;
     let fields = parse_fields(&body, variables, &fragments)?;
+    validate_query_fields(snapshot, &fields)?;
     let mut data = Map::new();
 
     for field in fields {
@@ -107,6 +108,71 @@ fn execute_query(
     }
 
     Ok(Value::Object(data))
+}
+
+fn validate_query_fields(snapshot: &StoreSnapshot, fields: &[ParsedField]) -> Result<(), String> {
+    for field in fields {
+        match field.name.as_str() {
+            "__typename" | "__schema" | "__type" => {}
+            "_meta" => validate_meta_fields("_Meta_", &field.selection)?,
+            _ => {
+                let Some(entity_name) = entity_name_for_query(snapshot, &field.name) else {
+                    return Err(format!("unknown query field `{}`", field.name));
+                };
+                validate_entity_fields(snapshot, &entity_name, &field.selection)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_meta_fields(type_name: &str, fields: &[ParsedField]) -> Result<(), String> {
+    for field in fields {
+        match (type_name, field.name.as_str()) {
+            (_, "__typename") => {}
+            ("_Meta_", "block") => validate_meta_fields("_Block_", &field.selection)?,
+            ("_Meta_", "hasIndexingErrors") | ("_Block_", "hash" | "number") => {
+                if !field.selection.is_empty() {
+                    return Err(format!(
+                        "Field `{type_name}.{}` must not have a selection",
+                        field.name
+                    ));
+                }
+            }
+            _ => return Err(format!("Type `{type_name}` has no field `{}`", field.name)),
+        }
+    }
+    Ok(())
+}
+
+fn validate_entity_fields(
+    snapshot: &StoreSnapshot,
+    entity_name: &str,
+    fields: &[ParsedField],
+) -> Result<(), String> {
+    let Some(entity_type) = snapshot.schema.entities.get(entity_name) else {
+        return Ok(());
+    };
+    for field in fields {
+        if field.name == "__typename" {
+            continue;
+        }
+        let Some(schema_field) = entity_type.fields.get(&field.name) else {
+            return Err(format!(
+                "Type `{entity_name}` has no field `{}`",
+                field.name
+            ));
+        };
+        if is_entity_type(snapshot, &schema_field.kind) {
+            validate_entity_fields(snapshot, &schema_field.kind, &field.selection)?;
+        } else if !field.selection.is_empty() {
+            return Err(format!(
+                "Field `{entity_name}.{}` must not have a selection",
+                field.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn execute_root_field(snapshot: &StoreSnapshot, field: &ParsedField) -> Result<Value, String> {
@@ -2028,6 +2094,35 @@ mod tests {
         );
         assert_eq!(result["data"]["protocol"]["owner"]["name"], "Alice");
         assert_eq!(result["data"]["protocol"]["purchases"][0]["amount"], "12");
+    }
+
+    #[test]
+    fn rejects_unknown_entity_fields_like_graph_node() {
+        let snapshot = fixture_snapshot();
+        let result = execute_graphql(
+            &snapshot,
+            r#"{ protocol(id: "0xabc") { id missingField } }"#,
+        );
+
+        assert_eq!(
+            result["errors"][0]["message"],
+            "Type `Protocol` has no field `missingField`"
+        );
+        assert!(result.get("data").is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_nested_relation_fields_like_graph_node() {
+        let snapshot = fixture_snapshot();
+        let result = execute_graphql(
+            &snapshot,
+            r#"{ protocol(id: "0xabc") { owner { id email } } }"#,
+        );
+
+        assert_eq!(
+            result["errors"][0]["message"],
+            "Type `User` has no field `email`"
+        );
     }
 
     #[test]
