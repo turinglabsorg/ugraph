@@ -17,8 +17,12 @@
 - Implemented local flow: `ugraph deploy --provider local` can register feed
   subscriptions, run a bounded `chain-reader` pass, and sync a deployment from
   `UGRAPH_LOG_SOURCE=postgres-feed`.
+- Implemented feed schema tables: `ugraph_feed_subscriptions`,
+  `ugraph_raw_blocks`, and `ugraph_raw_logs`.
 - Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also
   forwards normal `ugraph` subcommands such as `deploy`, `chain-reader`, and
   `--help`.
+- GraphiQL is served from pinned React/GraphiQL assets and includes a built-in
+  fallback query UI if external assets fail.
 - Keep provider wiring out of the core runtime. DigitalOcean is a likely target,
   but the core container should stay portable.

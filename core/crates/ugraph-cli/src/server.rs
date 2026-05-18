@@ -508,30 +508,135 @@ fn percent_decode(input: &str) -> String {
 
 fn graphiql_html() -> &'static str {
     r#"<!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>UGraph GraphiQL</title>
-    <link rel="stylesheet" href="https://unpkg.com/graphiql/graphiql.min.css" />
+    <link rel="stylesheet" href="https://unpkg.com/graphiql@2.4.7/graphiql.min.css" />
     <style>
       html, body, #graphiql { height: 100%; margin: 0; }
       body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .fallback {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 12px;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 16px;
+        background: #f7f7f8;
+        color: #111827;
+      }
+      .fallback-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .fallback-title {
+        font-size: 15px;
+        font-weight: 650;
+      }
+      .fallback-note {
+        color: #6b7280;
+        font-size: 13px;
+      }
+      .fallback-grid {
+        display: grid;
+        grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+        gap: 12px;
+        min-height: 0;
+      }
+      textarea, pre {
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        margin: 0;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        padding: 12px;
+        background: #ffffff;
+        color: #111827;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow: auto;
+      }
+      button {
+        border: 1px solid #111827;
+        border-radius: 6px;
+        background: #111827;
+        color: white;
+        padding: 8px 12px;
+        font: inherit;
+        cursor: pointer;
+      }
+      @media (max-width: 760px) {
+        .fallback-grid { grid-template-columns: 1fr; }
+      }
     </style>
   </head>
   <body>
     <div id="graphiql">Loading GraphiQL...</div>
-    <script crossorigin src="https://unpkg.com/react/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom/umd/react-dom.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/graphiql/graphiql.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/graphiql@2.4.7/graphiql.min.js"></script>
     <script>
-      const fetcher = GraphiQL.createFetcher({ url: '/graphql' });
-      ReactDOM.createRoot(document.getElementById('graphiql')).render(
-        React.createElement(GraphiQL, {
-          fetcher,
-          defaultQuery: '{\n  _meta { block { number } }\n}'
-        })
-      );
+      const endpoint = '/graphql';
+      const defaultQuery = '{\n  _meta { block { number hash } hasIndexingErrors }\n}';
+
+      function graphQLFetcher(graphQLParams) {
+        return fetch(endpoint, {
+          method: 'post',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(graphQLParams)
+        }).then((response) => response.json());
+      }
+
+      function mountFallback(reason) {
+        const root = document.getElementById('graphiql');
+        root.innerHTML =
+          '<main class="fallback">' +
+            '<div class="fallback-bar">' +
+              '<button id="run-query" type="button">Run</button>' +
+              '<div><div class="fallback-title">UGraph GraphQL</div>' +
+              '<div class="fallback-note">' + reason + '</div></div>' +
+            '</div>' +
+            '<div class="fallback-grid">' +
+              '<textarea id="query-input" spellcheck="false"></textarea>' +
+              '<pre id="query-output"></pre>' +
+            '</div>' +
+          '</main>';
+        const input = document.getElementById('query-input');
+        const output = document.getElementById('query-output');
+        input.value = defaultQuery;
+        async function runQuery() {
+          output.textContent = 'Loading...';
+          try {
+            const json = await graphQLFetcher({ query: input.value });
+            output.textContent = JSON.stringify(json, null, 2);
+          } catch (error) {
+            output.textContent = String(error && error.message ? error.message : error);
+          }
+        }
+        document.getElementById('run-query').addEventListener('click', runQuery);
+        runQuery();
+      }
+
+      try {
+        if (!window.React || !window.ReactDOM || !window.GraphiQL) {
+          mountFallback('GraphiQL assets did not load; using built-in fallback.');
+        } else {
+          const fetcher = GraphiQL.createFetcher
+            ? GraphiQL.createFetcher({ url: endpoint })
+            : graphQLFetcher;
+          const element = React.createElement(GraphiQL, { fetcher, defaultQuery });
+          if (ReactDOM.createRoot) {
+            ReactDOM.createRoot(document.getElementById('graphiql')).render(element);
+          } else {
+            ReactDOM.render(element, document.getElementById('graphiql'));
+          }
+        }
+      } catch (error) {
+        mountFallback('GraphiQL failed to start; using built-in fallback.');
+      }
     </script>
   </body>
 </html>"#
@@ -586,5 +691,15 @@ mod tests {
             prometheus_label_value("a\"b\\c\nd"),
             r#"a\"b\\c\nd"#.to_string()
         );
+    }
+
+    #[test]
+    fn graphiql_html_uses_pinned_assets_and_fallback() {
+        let html = graphiql_html();
+
+        assert!(html.contains("react@18.2.0"));
+        assert!(html.contains("graphiql@2.4.7"));
+        assert!(html.contains("GraphiQL assets did not load"));
+        assert!(html.contains("graphQLFetcher"));
     }
 }

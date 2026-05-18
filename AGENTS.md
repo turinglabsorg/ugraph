@@ -84,6 +84,8 @@
   API containers see indexer writes committed to Postgres without restart.
 - `core serve` exposes `/status` as a small HTML operational page and
   `/metrics` in Prometheus text format.
+- `core serve` serves GraphiQL with pinned React/GraphiQL assets and a built-in
+  fallback query UI if external assets fail.
 - `core conformance` runs batch GraphQL diffs against Goldsky/Graph Node from
   JSON case files. GrowFi cases live in `core/examples/growfi/conformance.json`.
 - `core matrix` is the repeatable compatibility report command. It runs

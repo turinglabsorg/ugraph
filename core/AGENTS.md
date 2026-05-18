@@ -123,6 +123,8 @@ docker compose up --build
   `_meta.block.hash` for the current snapshot, and generated schema
   introspection for entity/filter/meta types. Exact GraphQL validation/error
   parity is still incomplete.
+- GraphiQL uses pinned React/GraphiQL assets and falls back to a built-in query
+  UI if external assets do not load.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`
   matched through `ugraph compare` for `_meta(block:)`, `campaigns(block:,
   where: id_in, orderBy:)`, `acceptedTokens`, `purchases`, and
