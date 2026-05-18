@@ -18,6 +18,14 @@
   subscriptions and loop bounded `chain-reader`/`sync` passes from
   `UGRAPH_LOG_SOURCE=postgres-feed` until dynamic data source backfills are
   complete.
+- Implemented control-plane identity tables and CLI commands:
+  `ugraph users` manages users, hashed API keys, and the public-signup switch;
+  `ugraph deployments` lists ownership/version/visibility metadata and can
+  update query visibility.
+- `ugraph deploy --provider local` accepts `--version`, `--visibility
+  private|public`, `--owner-email`, and `--api-key`. API keys require `deploy`
+  scope for deploy metadata writes; private GraphQL deployments require a
+  `query`-scoped key through `Authorization: Bearer <key>` or `x-api-key`.
 - Implemented feed schema tables: `ugraph_feed_subscriptions`,
   `ugraph_raw_blocks`, and `ugraph_raw_logs`.
 - Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also

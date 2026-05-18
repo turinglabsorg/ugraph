@@ -20,7 +20,7 @@ log_source="${UGRAPH_LOG_SOURCE:-rpc}"
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    -h|--help|validate|inspect|rpc|wasm-imports|wasm-exports|handler-exports|abi-events|plan|scan|replay|sync|chain-reader|deploy|serve|compare|conformance|schema|handler-signatures|compat|runtime-check|type-ids|doctor|matrix)
+    -h|--help|validate|inspect|rpc|wasm-imports|wasm-exports|handler-exports|abi-events|plan|scan|replay|sync|chain-reader|deploy|users|deployments|serve|compare|conformance|schema|handler-signatures|compat|runtime-check|type-ids|doctor|matrix)
       exec /usr/local/bin/ugraph "$@"
       ;;
     *)

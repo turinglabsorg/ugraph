@@ -10,4 +10,9 @@
 	}
 
 	reverse_proxy api:8030
+
+	handle_errors {
+		header Content-Type "application/json"
+		respond `{"errors":[{"message":"upstream unavailable"}]}` {http.error.status_code}
+	}
 }

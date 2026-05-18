@@ -38,15 +38,12 @@ stress-testing the feed worker.
 cd ugraph
 PROJECT_ID=iconic-elevator-394020 \
 ZONE=us-central1-a \
-UGRAPH_DOMAIN=ugraph.growfi.dev \
-DO_DNS_ZONE=growfi.dev \
-UGRAPH_RPC_URL=https://sepolia.drpc.org \
-infra/gcp/e2-micro/scripts/deploy.sh
+infra/gcp/e2-micro/scripts/deploy-chain.sh infra/gcp/e2-micro/chains/sepolia.yaml
 ```
 
-If `UGRAPH_RPC_URL` is empty, `ugraph` resolves RPC endpoints from Chainlist.
-For production indexing, prefer an explicit RPC URL to avoid public endpoint
-rate limits.
+Chain-specific values live in `chains/*.yaml`, not in `.env`. If `rpc_url` is
+empty, `ugraph` resolves RPC endpoints from Chainlist. For production indexing,
+prefer an explicit RPC URL to avoid public endpoint rate limits.
 
 The script creates or reuses:
 
@@ -76,6 +73,11 @@ Security defaults:
 - runtime secrets live in `/opt/ugraph/.env` with `0600` permissions;
 - Caddy adds baseline security headers and redirects HTTP to HTTPS.
 
+`UGRAPH_POLL_INTERVAL_MS` is deliberately configurable. Use a chain-specific
+value: Sepolia can run at `12000`, while faster chains can use lower values
+such as `1000`. Chain timing belongs in deployment/chain manifests, not in
+secrets.
+
 ## Status
 
 ```bash
@@ -91,6 +93,22 @@ https://<domain>/graphql
 https://<domain>/status
 https://<domain>/healthz
 ```
+
+## Users and API keys
+
+The e2-micro target does not expose Postgres publicly. Run control-plane CLI
+commands on the VM, over an SSH tunnel, or from a trusted host that can reach
+the database. The schema supports:
+
+- users keyed by normalized email;
+- API keys stored as hashes only;
+- `public_user_signup` enabled/disabled state;
+- deployment metadata with version label, owner, API-key prefix, and
+  `public|private` visibility.
+
+Private deployments require `Authorization: Bearer <key>` or `x-api-key` with
+`query` scope on `/graphql`. Deployments without metadata stay public during
+upgrades.
 
 ## Destroy
 

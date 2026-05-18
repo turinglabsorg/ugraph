@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::{
     query::{execute_graphql_with_operation, GraphqlHttpRequest},
     state::StoreSnapshot,
-    storage::SnapshotStore,
+    storage::{self, SnapshotStore},
 };
 
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
@@ -75,6 +75,7 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
+    let headers = parse_headers(lines);
     let (path, query_string) = target
         .split_once('?')
         .map(|(path, query)| (path, Some(query)))
@@ -104,6 +105,23 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
             if let Some(query_string) = query_string {
                 let params = parse_query_params(query_string);
                 if let Some(query) = params.get("query") {
+                    match graphql_authorized(store, &headers) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return write_json_status(
+                                &mut stream,
+                                "401 Unauthorized",
+                                &json!({ "errors": [{ "message": "api key required" }] }),
+                            );
+                        }
+                        Err(error) => {
+                            return write_json_status(
+                                &mut stream,
+                                "503 Service Unavailable",
+                                &json!({ "errors": [{ "message": error.to_string() }] }),
+                            );
+                        }
+                    }
                     return match store.load() {
                         Ok(snapshot) => {
                             let variables = params
@@ -175,6 +193,23 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
             ),
         },
         ("POST", "/graphql") => {
+            match graphql_authorized(store, &headers) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return write_json_status(
+                        &mut stream,
+                        "401 Unauthorized",
+                        &json!({ "errors": [{ "message": "api key required" }] }),
+                    );
+                }
+                Err(error) => {
+                    return write_json_status(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        &json!({ "errors": [{ "message": error.to_string() }] }),
+                    );
+                }
+            }
             let payload =
                 serde_json::from_slice::<GraphqlHttpRequest>(body).unwrap_or(GraphqlHttpRequest {
                     query: String::new(),
@@ -274,13 +309,50 @@ fn write_response(
     body: &[u8],
 ) -> anyhow::Result<()> {
     let header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type, authorization\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type, authorization, x-api-key\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()?;
     Ok(())
+}
+
+fn parse_headers<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
+    lines
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            Some((key.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn graphql_authorized(
+    store: &SnapshotStore,
+    headers: &BTreeMap<String, String>,
+) -> anyhow::Result<bool> {
+    let SnapshotStore::Postgres { url, deployment } = store else {
+        return Ok(true);
+    };
+    let visibility =
+        storage::deployment_visibility(url, deployment)?.unwrap_or_else(|| "public".to_string());
+    if visibility != "private" {
+        return Ok(true);
+    }
+    let Some(key) = request_api_key(headers) else {
+        return Ok(false);
+    };
+    Ok(storage::verify_api_key_scope(url, key, "query")?.is_some())
+}
+
+fn request_api_key(headers: &BTreeMap<String, String>) -> Option<&str> {
+    if let Some(value) = headers.get("x-api-key") {
+        return Some(value.as_str());
+    }
+    let value = headers.get("authorization")?;
+    value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
 }
 
 fn metrics_text(store: &SnapshotStore, snapshot: &StoreSnapshot) -> String {
@@ -583,9 +655,14 @@ fn graphiql_html() -> &'static str {
       const defaultQuery = '{\n  _meta { block { number hash } hasIndexingErrors }\n}';
 
       function graphQLFetcher(graphQLParams) {
+        const headers = { 'content-type': 'application/json' };
+        const apiKey = window.localStorage && window.localStorage.getItem('ugraph_api_key');
+        if (apiKey) {
+          headers.authorization = 'Bearer ' + apiKey;
+        }
         return fetch(endpoint, {
           method: 'post',
-          headers: { 'content-type': 'application/json' },
+          headers,
           body: JSON.stringify(graphQLParams)
         }).then((response) => response.json());
       }
@@ -625,7 +702,12 @@ fn graphiql_html() -> &'static str {
           mountFallback('GraphiQL assets did not load; using built-in fallback.');
         } else {
           const fetcher = GraphiQL.createFetcher
-            ? GraphiQL.createFetcher({ url: endpoint })
+            ? GraphiQL.createFetcher({
+                url: endpoint,
+                headers: window.localStorage && window.localStorage.getItem('ugraph_api_key')
+                  ? { authorization: 'Bearer ' + window.localStorage.getItem('ugraph_api_key') }
+                  : undefined
+              })
             : graphQLFetcher;
           const element = React.createElement(GraphiQL, { fetcher, defaultQuery });
           if (ReactDOM.createRoot) {
@@ -701,5 +783,15 @@ mod tests {
         assert!(html.contains("graphiql@2.4.7"));
         assert!(html.contains("GraphiQL assets did not load"));
         assert!(html.contains("graphQLFetcher"));
+        assert!(html.contains("ugraph_api_key"));
+    }
+
+    #[test]
+    fn request_api_key_accepts_bearer_or_x_api_key() {
+        let bearer_headers = parse_headers(["Authorization: Bearer ugraph_secret"].into_iter());
+        assert_eq!(request_api_key(&bearer_headers), Some("ugraph_secret"));
+
+        let direct_headers = parse_headers(["x-api-key: direct_secret"].into_iter());
+        assert_eq!(request_api_key(&direct_headers), Some("direct_secret"));
     }
 }

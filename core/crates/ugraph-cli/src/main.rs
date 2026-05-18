@@ -57,11 +57,123 @@ enum DeployProvider {
     Local,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+enum DeploymentVisibility {
+    Private,
+    Public,
+}
+
+impl DeploymentVisibility {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Public => "public",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum ReorgPolicy {
     Fail,
     Rollback,
     Reset,
+}
+
+#[derive(Debug, Subcommand)]
+enum UserCommand {
+    /// Create or update a user.
+    Create {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long, default_value = "member")]
+        role: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List users.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage whether public user signup is enabled.
+    Signup {
+        #[command(subcommand)]
+        command: SignupCommand,
+    },
+    /// Manage API keys.
+    Key {
+        #[command(subcommand)]
+        command: ApiKeyCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SignupCommand {
+    /// Print current public signup setting.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable public user signup.
+    Enable {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable public user signup.
+    Disable {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ApiKeyCommand {
+    /// Create an API key for a user. The secret is printed once.
+    Create {
+        #[arg(long)]
+        email: String,
+        #[arg(long, default_value = "default")]
+        name: String,
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify an API key and print its user.
+    Verify {
+        #[arg(long, env = "UGRAPH_API_KEY")]
+        api_key: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke an API key by prefix.
+    Revoke {
+        #[arg(long)]
+        prefix: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DeploymentCommand {
+    /// List deployment ownership, versions, and visibility.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change deployment query visibility.
+    SetVisibility {
+        #[arg(long)]
+        deployment: String,
+        #[arg(long, value_enum)]
+        visibility: DeploymentVisibility,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -269,6 +381,14 @@ enum Command {
         postgres_url: Option<String>,
         #[arg(long, env = "UGRAPH_DEPLOYMENT", default_value = "default")]
         deployment: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long, value_enum, default_value = "private")]
+        visibility: DeploymentVisibility,
+        #[arg(long)]
+        owner_email: Option<String>,
+        #[arg(long, env = "UGRAPH_API_KEY")]
+        api_key: Option<String>,
         #[arg(long, env = "UGRAPH_CHAIN_ID", default_value_t = 11155111)]
         chain_id: u64,
         #[arg(long, env = "UGRAPH_RPC_URL")]
@@ -296,6 +416,20 @@ enum Command {
         rpc_retries: u32,
         #[arg(long)]
         json: bool,
+    },
+    /// Manage users, public signup, and API keys.
+    Users {
+        #[arg(long, env = "UGRAPH_POSTGRES_URL")]
+        postgres_url: String,
+        #[command(subcommand)]
+        command: UserCommand,
+    },
+    /// Inspect or update deployment ownership metadata.
+    Deployments {
+        #[arg(long, env = "UGRAPH_POSTGRES_URL")]
+        postgres_url: String,
+        #[command(subcommand)]
+        command: DeploymentCommand,
     },
     /// Serve GraphQL and GraphiQL from a current-state snapshot.
     Serve {
@@ -573,6 +707,10 @@ struct ChainReaderInput {
 struct DeployReport {
     provider: DeployProvider,
     deployment: String,
+    version_label: Option<String>,
+    visibility: DeploymentVisibility,
+    owner_email: Option<String>,
+    metadata: Option<storage::DeploymentMetadataRecord>,
     log_source: LogSourceKind,
     passes: usize,
     feeds: Vec<storage::FeedIngestReport>,
@@ -1098,6 +1236,10 @@ fn main() -> anyhow::Result<()> {
             storage,
             postgres_url,
             deployment,
+            version,
+            visibility,
+            owner_email,
+            api_key,
             chain_id,
             rpc_url,
             log_source,
@@ -1111,6 +1253,13 @@ fn main() -> anyhow::Result<()> {
             json,
         } => {
             let build_dir = default_build_dir(&manifest, build_dir);
+            if let Some(key) = api_key.as_deref() {
+                let postgres_url = postgres_url
+                    .as_deref()
+                    .context("--api-key requires --postgres-url")?;
+                storage::verify_api_key_scope(postgres_url, key, "deploy")?
+                    .context("api key is invalid, revoked, or missing deploy scope")?;
+            }
             let store = snapshot_store(
                 storage,
                 PathBuf::from(".ugraph/state.json"),
@@ -1171,9 +1320,24 @@ fn main() -> anyhow::Result<()> {
                 sync_reset = false;
             }
             let snapshot = snapshot.context("deploy sync did not run")?;
+            let metadata = match &store {
+                SnapshotStore::Postgres { url, .. } => Some(storage::record_deployment_metadata(
+                    url,
+                    &deployment,
+                    version.as_deref(),
+                    visibility.as_str(),
+                    owner_email.as_deref(),
+                    api_key.as_deref(),
+                )?),
+                SnapshotStore::Json { .. } => None,
+            };
             let report = DeployReport {
                 provider,
                 deployment,
+                version_label: version,
+                visibility,
+                owner_email,
+                metadata,
                 log_source,
                 passes,
                 feeds,
@@ -1185,6 +1349,20 @@ fn main() -> anyhow::Result<()> {
             } else {
                 println!("provider: {:?}", report.provider);
                 println!("deployment: {}", report.deployment);
+                println!(
+                    "version: {}",
+                    report.version_label.as_deref().unwrap_or("<none>")
+                );
+                println!("visibility: {}", report.visibility.as_str());
+                println!(
+                    "owner: {}",
+                    report
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.owner_email.as_deref())
+                        .or(report.owner_email.as_deref())
+                        .unwrap_or("<none>")
+                );
                 println!("logSource: {:?}", report.log_source);
                 println!("passes: {}", report.passes);
                 let feed_inserted_logs: u64 =
@@ -1212,6 +1390,159 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::Users {
+            postgres_url,
+            command,
+        } => match command {
+            UserCommand::Create {
+                email,
+                display_name,
+                role,
+                json,
+            } => {
+                let user = storage::create_or_update_user(
+                    &postgres_url,
+                    &email,
+                    display_name.as_deref(),
+                    &role,
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&user)?);
+                } else {
+                    println!("id: {}", user.id);
+                    println!("email: {}", user.email);
+                    println!(
+                        "displayName: {}",
+                        user.display_name.as_deref().unwrap_or("<none>")
+                    );
+                    println!("role: {}", user.role);
+                    println!("createdAt: {}", user.created_at);
+                }
+            }
+            UserCommand::List { json } => {
+                let users = storage::list_users(&postgres_url)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&users)?);
+                } else {
+                    for user in users {
+                        println!(
+                            "{} email={} role={} createdAt={}",
+                            user.id, user.email, user.role, user.created_at
+                        );
+                    }
+                }
+            }
+            UserCommand::Signup { command } => match command {
+                SignupCommand::Status { json } => {
+                    let enabled = storage::public_signup_enabled(&postgres_url)?;
+                    print_signup_status(enabled, json)?;
+                }
+                SignupCommand::Enable { json } => {
+                    storage::set_public_signup(&postgres_url, true)?;
+                    print_signup_status(true, json)?;
+                }
+                SignupCommand::Disable { json } => {
+                    storage::set_public_signup(&postgres_url, false)?;
+                    print_signup_status(false, json)?;
+                }
+            },
+            UserCommand::Key { command } => match command {
+                ApiKeyCommand::Create {
+                    email,
+                    name,
+                    mut scopes,
+                    json,
+                } => {
+                    if scopes.is_empty() {
+                        scopes = vec!["deploy".to_string(), "query".to_string()];
+                    }
+                    let key = storage::create_api_key(&postgres_url, &email, &name, &scopes)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&key)?);
+                    } else {
+                        println!("key: {}", key.key);
+                        println!("id: {}", key.record.id);
+                        println!("prefix: {}", key.record.prefix);
+                        println!("userId: {}", key.record.user_id);
+                        println!("scopes: {}", key.record.scopes.join(","));
+                    }
+                }
+                ApiKeyCommand::Verify { api_key, json } => {
+                    let user = storage::verify_api_key(&postgres_url, &api_key)?
+                        .context("api key is invalid or revoked")?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&user)?);
+                    } else {
+                        println!("ok: true");
+                        println!("userId: {}", user.id);
+                        println!("email: {}", user.email);
+                        println!("role: {}", user.role);
+                    }
+                }
+                ApiKeyCommand::Revoke { prefix, json } => {
+                    let revoked = storage::revoke_api_key(&postgres_url, &prefix)?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "revoked": revoked,
+                                "prefix": prefix
+                            }))?
+                        );
+                    } else {
+                        println!("revoked: {revoked}");
+                    }
+                }
+            },
+        },
+        Command::Deployments {
+            postgres_url,
+            command,
+        } => match command {
+            DeploymentCommand::List { json } => {
+                let deployments = storage::list_deployment_metadata(&postgres_url)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&deployments)?);
+                } else {
+                    for deployment in deployments {
+                        println!(
+                            "{} version={} visibility={} owner={} key={} updatedAt={}",
+                            deployment.deployment,
+                            deployment.version_label.as_deref().unwrap_or("<none>"),
+                            deployment.visibility,
+                            deployment.owner_email.as_deref().unwrap_or("<none>"),
+                            deployment
+                                .created_by_key_prefix
+                                .as_deref()
+                                .unwrap_or("<none>"),
+                            deployment.updated_at
+                        );
+                    }
+                }
+            }
+            DeploymentCommand::SetVisibility {
+                deployment,
+                visibility,
+                json,
+            } => {
+                let metadata = storage::set_deployment_visibility(
+                    &postgres_url,
+                    &deployment,
+                    visibility.as_str(),
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&metadata)?);
+                } else {
+                    println!("deployment: {}", metadata.deployment);
+                    println!("visibility: {}", metadata.visibility);
+                    println!(
+                        "owner: {}",
+                        metadata.owner_email.as_deref().unwrap_or("<none>")
+                    );
+                    println!("updatedAt: {}", metadata.updated_at);
+                }
+            }
+        },
         Command::Serve {
             state_file,
             storage,
@@ -2467,6 +2798,20 @@ fn snapshot_store(
             deployment,
         }),
     }
+}
+
+fn print_signup_status(enabled: bool, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "publicUserSignup": enabled
+            }))?
+        );
+    } else {
+        println!("publicUserSignup: {enabled}");
+    }
+    Ok(())
 }
 
 fn log_source_for_sync(kind: LogSourceKind, store: &SnapshotStore) -> anyhow::Result<LogSource> {

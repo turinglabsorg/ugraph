@@ -27,7 +27,7 @@ generate_password() {
   od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
 }
 
-UGRAPH_POSTGRES_PASSWORD="${UGRAPH_POSTGRES_PASSWORD:-$(generate_password)}"
+UGRAPH_POSTGRES_PASSWORD="${UGRAPH_POSTGRES_PASSWORD:-}"
 UGRAPH_DEPLOYMENT="${UGRAPH_DEPLOYMENT:-growfi}"
 UGRAPH_MANIFEST="${UGRAPH_MANIFEST:-/app/examples/growfi/subgraph.yaml}"
 UGRAPH_CHAIN_ID="${UGRAPH_CHAIN_ID:-11155111}"
@@ -138,6 +138,18 @@ done
 
 EXTERNAL_IP="$("$GCLOUD" compute instances describe "$VM_NAME" --project "$PROJECT_ID" --zone "$ZONE" --format='get(networkInterfaces[0].accessConfigs[0].natIP)')"
 UGRAPH_DOMAIN="${UGRAPH_DOMAIN:-${EXTERNAL_IP}.sslip.io}"
+if [ -z "$UGRAPH_POSTGRES_PASSWORD" ]; then
+  existing_password="$(
+    "$GCLOUD" compute ssh "$VM_NAME" --project "$PROJECT_ID" --zone "$ZONE" \
+      --command "test -f '${REMOTE_DIR}/.env' && grep '^UGRAPH_POSTGRES_PASSWORD=' '${REMOTE_DIR}/.env' | sed 's/^UGRAPH_POSTGRES_PASSWORD=//'" \
+      2>/dev/null || true
+  )"
+  if [ -n "$existing_password" ]; then
+    UGRAPH_POSTGRES_PASSWORD="$existing_password"
+  else
+    UGRAPH_POSTGRES_PASSWORD="$(generate_password)"
+  fi
+fi
 
 if [ -n "$DO_DNS_ZONE" ]; then
   case "$UGRAPH_DOMAIN" in

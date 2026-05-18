@@ -2227,10 +2227,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
  "postgres",
  "reqwest",
  "serde",
  "serde_json",
+ "tiny-keccak",
  "ugraph-core",
  "ugraph-runtime",
 ]

@@ -1,8 +1,9 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
 
 use anyhow::Context;
 use postgres::{Client, NoTls};
 use serde_json::Value;
+use tiny_keccak::{Hasher, Keccak};
 use ugraph_core::{
     decode_event_params, parse_rpc_u64, EntitySchema, RawEthereumLog, ScanSourceReport, SourcePlan,
 };
@@ -54,6 +55,46 @@ pub struct FeedRollbackReport {
     pub deleted_blocks: u64,
     pub deleted_logs: u64,
     pub updated_subscriptions: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserRecord {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub role: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ApiKeyRecord {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub prefix: String,
+    pub scopes: Vec<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CreatedApiKey {
+    pub key: String,
+    pub record: ApiKeyRecord,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeploymentMetadataRecord {
+    pub deployment: String,
+    pub version_label: Option<String>,
+    pub visibility: String,
+    pub owner_user_id: Option<String>,
+    pub owner_email: Option<String>,
+    pub created_by_key_id: Option<String>,
+    pub created_by_key_prefix: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 impl SnapshotStore {
@@ -139,8 +180,383 @@ fn connect(url: &str) -> anyhow::Result<Client> {
     Client::connect(url, NoTls).context("connecting to postgres")
 }
 
+pub fn create_or_update_user(
+    url: &str,
+    email: &str,
+    display_name: Option<&str>,
+    role: &str,
+) -> anyhow::Result<UserRecord> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let normalized_email = normalize_email(email)?;
+    let user_id = stable_id("user", &normalized_email);
+    let row = client.query_one(
+        r#"
+        insert into ugraph_users (id, email, display_name, role)
+        values ($1, $2, $3, $4)
+        on conflict (email) do update
+        set display_name = coalesce(excluded.display_name, ugraph_users.display_name),
+            role = excluded.role
+        returning id, email, display_name, role, created_at::text
+        "#,
+        &[&user_id, &normalized_email, &display_name, &role],
+    )?;
+    Ok(row_to_user(row))
+}
+
+pub fn list_users(url: &str) -> anyhow::Result<Vec<UserRecord>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    Ok(client
+        .query(
+            "select id, email, display_name, role, created_at::text from ugraph_users order by created_at, email",
+            &[],
+        )?
+        .into_iter()
+        .map(row_to_user)
+        .collect())
+}
+
+pub fn create_api_key(
+    url: &str,
+    email: &str,
+    name: &str,
+    scopes: &[String],
+) -> anyhow::Result<CreatedApiKey> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let normalized_email = normalize_email(email)?;
+    let user = client
+        .query_opt(
+            "select id, email, display_name, role, created_at::text from ugraph_users where email = $1",
+            &[&normalized_email],
+        )?
+        .map(row_to_user)
+        .with_context(|| format!("user `{normalized_email}` does not exist"))?;
+    let key = generate_api_key()?;
+    let key_hash = hash_api_key(&key);
+    let prefix = key_prefix(&key);
+    let id = stable_id("key", &key_hash);
+    let scopes_value = serde_json::to_value(scopes).context("encoding api key scopes")?;
+    let row = client.query_one(
+        r#"
+        insert into ugraph_api_keys (id, user_id, name, prefix, key_hash, scopes)
+        values ($1, $2, $3, $4, $5, $6)
+        returning id, user_id, name, prefix, scopes, created_at::text, last_used_at::text, revoked_at::text
+        "#,
+        &[&id, &user.id, &name, &prefix, &key_hash, &scopes_value],
+    )?;
+    Ok(CreatedApiKey {
+        key,
+        record: row_to_api_key(row)?,
+    })
+}
+
+pub fn verify_api_key(url: &str, key: &str) -> anyhow::Result<Option<UserRecord>> {
+    verify_api_key_for_scope(url, key, None)
+}
+
+pub fn verify_api_key_scope(
+    url: &str,
+    key: &str,
+    scope: &str,
+) -> anyhow::Result<Option<UserRecord>> {
+    verify_api_key_for_scope(url, key, Some(scope))
+}
+
+fn verify_api_key_for_scope(
+    url: &str,
+    key: &str,
+    required_scope: Option<&str>,
+) -> anyhow::Result<Option<UserRecord>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let key_hash = hash_api_key(key);
+    let Some(row) = client.query_opt(
+        r#"
+        select u.id, u.email, u.display_name, u.role, u.created_at::text, k.id as key_id, k.scopes
+        from ugraph_api_keys k
+        join ugraph_users u on u.id = k.user_id
+        where k.key_hash = $1 and k.revoked_at is null
+        "#,
+        &[&key_hash],
+    )?
+    else {
+        return Ok(None);
+    };
+    let key_id: String = row.get("key_id");
+    let scopes_value: Value = row.get("scopes");
+    let scopes: Vec<String> =
+        serde_json::from_value(scopes_value).context("decoding api key scopes")?;
+    if let Some(scope) = required_scope {
+        if !scopes
+            .iter()
+            .any(|candidate| candidate == "*" || candidate == scope)
+        {
+            return Ok(None);
+        }
+    }
+    client.execute(
+        "update ugraph_api_keys set last_used_at = now() where id = $1",
+        &[&key_id],
+    )?;
+    Ok(Some(row_to_user(row)))
+}
+
+pub fn revoke_api_key(url: &str, prefix: &str) -> anyhow::Result<u64> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    Ok(client.execute(
+        "update ugraph_api_keys set revoked_at = now() where prefix = $1 and revoked_at is null",
+        &[&prefix],
+    )?)
+}
+
+pub fn set_public_signup(url: &str, enabled: bool) -> anyhow::Result<()> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let value = serde_json::to_value(enabled)?;
+    client.execute(
+        r#"
+        insert into ugraph_settings (key, value)
+        values ('public_user_signup', $1)
+        on conflict (key) do update set value = excluded.value, updated_at = now()
+        "#,
+        &[&value],
+    )?;
+    Ok(())
+}
+
+pub fn public_signup_enabled(url: &str) -> anyhow::Result<bool> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let row = client.query_one(
+        "select value from ugraph_settings where key = 'public_user_signup'",
+        &[],
+    )?;
+    let value: Value = row.get("value");
+    Ok(value.as_bool().unwrap_or(false))
+}
+
+pub fn record_deployment_metadata(
+    url: &str,
+    deployment: &str,
+    version_label: Option<&str>,
+    visibility: &str,
+    owner_email: Option<&str>,
+    api_key: Option<&str>,
+) -> anyhow::Result<DeploymentMetadataRecord> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let explicit_owner_user_id = match owner_email {
+        Some(email) => {
+            let normalized_email = normalize_email(email)?;
+            Some(
+                client
+                    .query_opt(
+                        "select id from ugraph_users where email = $1",
+                        &[&normalized_email],
+                    )?
+                    .map(|row| row.get::<_, String>("id"))
+                    .with_context(|| format!("owner user `{normalized_email}` does not exist"))?,
+            )
+        }
+        None => None,
+    };
+    let (created_by_key_id, key_owner_user_id) = match api_key {
+        Some(key) if !key.trim().is_empty() => {
+            let key_hash = hash_api_key(key);
+            let row = client
+                .query_opt(
+                    "select id, user_id from ugraph_api_keys where key_hash = $1 and revoked_at is null",
+                    &[&key_hash],
+                )?
+                .context("api key is invalid or revoked")?;
+            (
+                Some(row.get::<_, String>("id")),
+                Some(row.get::<_, String>("user_id")),
+            )
+        }
+        _ => (None, None),
+    };
+    let owner_user_id = explicit_owner_user_id.or(key_owner_user_id);
+    client.execute(
+        r#"
+        insert into ugraph_deployment_metadata
+          (deployment, version_label, visibility, owner_user_id, created_by_key_id)
+        values ($1, $2, $3, $4, $5)
+        on conflict (deployment) do update
+        set version_label = excluded.version_label,
+            visibility = excluded.visibility,
+            owner_user_id = coalesce(excluded.owner_user_id, ugraph_deployment_metadata.owner_user_id),
+            created_by_key_id = coalesce(excluded.created_by_key_id, ugraph_deployment_metadata.created_by_key_id),
+            updated_at = now()
+        "#,
+        &[
+            &deployment,
+            &version_label,
+            &visibility,
+            &owner_user_id,
+            &created_by_key_id,
+        ],
+    )?;
+    load_deployment_metadata(&mut client, deployment)?
+        .with_context(|| format!("deployment metadata `{deployment}` was not stored"))
+}
+
+pub fn list_deployment_metadata(url: &str) -> anyhow::Result<Vec<DeploymentMetadataRecord>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    Ok(client
+        .query(
+            &format!("{DEPLOYMENT_METADATA_SELECT} order by m.updated_at desc, m.deployment"),
+            &[],
+        )?
+        .into_iter()
+        .map(row_to_deployment_metadata)
+        .collect())
+}
+
+pub fn deployment_visibility(url: &str, deployment: &str) -> anyhow::Result<Option<String>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    Ok(client
+        .query_opt(
+            "select visibility from ugraph_deployment_metadata where deployment = $1",
+            &[&deployment],
+        )?
+        .map(|row| row.get("visibility")))
+}
+
+pub fn set_deployment_visibility(
+    url: &str,
+    deployment: &str,
+    visibility: &str,
+) -> anyhow::Result<DeploymentMetadataRecord> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    client.execute(
+        r#"
+        insert into ugraph_deployment_metadata (deployment, visibility)
+        values ($1, $2)
+        on conflict (deployment) do update
+        set visibility = excluded.visibility, updated_at = now()
+        "#,
+        &[&deployment, &visibility],
+    )?;
+    load_deployment_metadata(&mut client, deployment)?
+        .with_context(|| format!("deployment metadata `{deployment}` was not stored"))
+}
+
+fn load_deployment_metadata(
+    client: &mut Client,
+    deployment: &str,
+) -> anyhow::Result<Option<DeploymentMetadataRecord>> {
+    Ok(client
+        .query_opt(
+            &format!("{DEPLOYMENT_METADATA_SELECT} where m.deployment = $1"),
+            &[&deployment],
+        )?
+        .map(row_to_deployment_metadata))
+}
+
+const DEPLOYMENT_METADATA_SELECT: &str = r#"
+        select
+          m.deployment,
+          m.version_label,
+          m.visibility,
+          m.owner_user_id,
+          owner.email as owner_email,
+          m.created_by_key_id,
+          key.prefix as created_by_key_prefix,
+          m.created_at::text,
+          m.updated_at::text
+        from ugraph_deployment_metadata m
+        left join ugraph_users owner on owner.id = m.owner_user_id
+        left join ugraph_api_keys key on key.id = m.created_by_key_id
+"#;
+
+fn normalize_email(email: &str) -> anyhow::Result<String> {
+    let email = email.trim().to_ascii_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        anyhow::bail!("invalid email `{email}`");
+    }
+    Ok(email)
+}
+
+fn stable_id(prefix: &str, input: &str) -> String {
+    format!("{prefix}_{}", &hash_api_key(input)[0..24])
+}
+
+fn generate_api_key() -> anyhow::Result<String> {
+    let mut bytes = [0_u8; 32];
+    File::open("/dev/urandom")
+        .context("opening /dev/urandom")?
+        .read_exact(&mut bytes)
+        .context("reading random api key bytes")?;
+    Ok(format!("ugraph_{}", hex::encode(bytes)))
+}
+
+fn key_prefix(key: &str) -> String {
+    key.chars().take(18).collect()
+}
+
+fn hash_api_key(key: &str) -> String {
+    let mut hasher = Keccak::v256();
+    hasher.update(key.as_bytes());
+    let mut out = [0_u8; 32];
+    hasher.finalize(&mut out);
+    hex::encode(out)
+}
+
+fn row_to_user(row: postgres::Row) -> UserRecord {
+    UserRecord {
+        id: row.get("id"),
+        email: row.get("email"),
+        display_name: row.get("display_name"),
+        role: row.get("role"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn row_to_api_key(row: postgres::Row) -> anyhow::Result<ApiKeyRecord> {
+    let scopes_value: Value = row.get("scopes");
+    Ok(ApiKeyRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        name: row.get("name"),
+        prefix: row.get("prefix"),
+        scopes: serde_json::from_value(scopes_value).context("decoding api key scopes")?,
+        created_at: row.get("created_at"),
+        last_used_at: row.get("last_used_at"),
+        revoked_at: row.get("revoked_at"),
+    })
+}
+
+fn row_to_deployment_metadata(row: postgres::Row) -> DeploymentMetadataRecord {
+    DeploymentMetadataRecord {
+        deployment: row.get("deployment"),
+        version_label: row.get("version_label"),
+        visibility: row.get("visibility"),
+        owner_user_id: row.get("owner_user_id"),
+        owner_email: row.get("owner_email"),
+        created_by_key_id: row.get("created_by_key_id"),
+        created_by_key_prefix: row.get("created_by_key_prefix"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
 fn migrate(client: &mut Client) -> anyhow::Result<()> {
-    client.batch_execute(POSTGRES_SCHEMA)?;
+    let key = "ugraph:schema";
+    client.query_one("select pg_advisory_lock(hashtextextended($1, 0))", &[&key])?;
+    let schema_result = client.batch_execute(POSTGRES_SCHEMA);
+    let unlock_result = client.query_one(
+        "select pg_advisory_unlock(hashtextextended($1, 0))",
+        &[&key],
+    );
+    schema_result?;
+    unlock_result?;
     Ok(())
 }
 
@@ -1072,6 +1488,50 @@ create table if not exists ugraph_deployments (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists ugraph_users (
+  id text primary key,
+  email text not null unique,
+  display_name text,
+  role text not null default 'member',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists ugraph_api_keys (
+  id text primary key,
+  user_id text not null references ugraph_users(id) on delete cascade,
+  name text not null,
+  prefix text not null unique,
+  key_hash text not null unique,
+  scopes jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz,
+  revoked_at timestamptz
+);
+
+create index if not exists ugraph_api_keys_user
+  on ugraph_api_keys (user_id, revoked_at);
+
+create table if not exists ugraph_settings (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+insert into ugraph_settings (key, value)
+values ('public_user_signup', 'false'::jsonb)
+on conflict (key) do nothing;
+
+create table if not exists ugraph_deployment_metadata (
+  deployment text primary key references ugraph_deployments(id) on delete cascade,
+  version_label text,
+  visibility text not null default 'private',
+  owner_user_id text references ugraph_users(id),
+  created_by_key_id text references ugraph_api_keys(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (visibility in ('private', 'public'))
+);
+
 alter table ugraph_deployments
   add column if not exists history jsonb not null default '[]'::jsonb;
 
@@ -1230,11 +1690,17 @@ mod tests {
             "ugraph_feed_subscriptions",
             "ugraph_raw_blocks",
             "ugraph_raw_logs",
+            "ugraph_users",
+            "ugraph_api_keys",
+            "ugraph_settings",
+            "ugraph_deployment_metadata",
         ] {
             assert!(POSTGRES_SCHEMA.contains(table));
         }
         assert!(POSTGRES_SCHEMA.contains("storage_mode"));
         assert!(POSTGRES_SCHEMA.contains("removed boolean"));
+        assert!(POSTGRES_SCHEMA.contains("public_user_signup"));
+        assert!(POSTGRES_SCHEMA.contains("visibility in ('private', 'public')"));
     }
 
     #[test]
@@ -1322,12 +1788,84 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn users_api_keys_and_deployment_metadata_roundtrip_when_url_is_set() -> anyhow::Result<()> {
+        let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
+            return Ok(());
+        };
+        let suffix = std::process::id();
+        let email = format!("identity-{suffix}@ugraph.local");
+        let deployment = format!("ugraph_identity_test_{suffix}");
+        let store = SnapshotStore::Postgres {
+            url: url.clone(),
+            deployment: deployment.clone(),
+        };
+        store.write(&fixture_snapshot())?;
+
+        let user = create_or_update_user(&url, &email, Some("Identity Test"), "admin")?;
+        assert_eq!(user.email, email);
+        assert_eq!(user.role, "admin");
+
+        let created = create_api_key(&url, &email, "ci", &["deploy".to_string()])?;
+        assert!(created.key.starts_with("ugraph_"));
+        assert_eq!(created.record.scopes, vec!["deploy".to_string()]);
+
+        let verified = verify_api_key(&url, &created.key)?.context("key should verify")?;
+        assert_eq!(verified.email, email);
+        assert!(verify_api_key_scope(&url, &created.key, "deploy")?.is_some());
+        assert!(verify_api_key_scope(&url, &created.key, "query")?.is_none());
+
+        set_public_signup(&url, true)?;
+        assert!(public_signup_enabled(&url)?);
+        set_public_signup(&url, false)?;
+        assert!(!public_signup_enabled(&url)?);
+
+        let metadata = record_deployment_metadata(
+            &url,
+            &deployment,
+            Some("v1"),
+            "private",
+            None,
+            Some(&created.key),
+        )?;
+        assert_eq!(metadata.deployment, deployment);
+        assert_eq!(metadata.version_label.as_deref(), Some("v1"));
+        assert_eq!(metadata.visibility, "private");
+        assert_eq!(metadata.owner_email.as_deref(), Some(email.as_str()));
+        assert_eq!(
+            metadata.created_by_key_prefix.as_deref(),
+            Some(created.record.prefix.as_str())
+        );
+
+        let metadata = set_deployment_visibility(&url, &deployment, "public")?;
+        assert_eq!(metadata.visibility, "public");
+
+        let deployments = list_deployment_metadata(&url)?;
+        assert!(deployments
+            .iter()
+            .any(|metadata| metadata.deployment == deployment));
+
+        assert_eq!(revoke_api_key(&url, &created.record.prefix)?, 1);
+        assert!(verify_api_key(&url, &created.key)?.is_none());
+
+        cleanup(&url, &deployment)?;
+        cleanup_user(&url, &email)?;
+        Ok(())
+    }
+
     fn cleanup(url: &str, deployment: &str) -> anyhow::Result<()> {
         let mut client = connect(url)?;
         client.execute(
             "delete from ugraph_deployments where id = $1",
             &[&deployment],
         )?;
+        Ok(())
+    }
+
+    fn cleanup_user(url: &str, email: &str) -> anyhow::Result<()> {
+        let mut client = connect(url)?;
+        migrate(&mut client)?;
+        client.execute("delete from ugraph_users where email = $1", &[&email])?;
         Ok(())
     }
 

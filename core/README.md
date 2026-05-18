@@ -43,7 +43,13 @@ cargo run -p ugraph -- matrix --manifest examples/growfi/subgraph.yaml --rpc-url
 cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --rpc-url <rpc>
 cargo run -p ugraph -- chain-reader --manifest examples/growfi/subgraph.yaml --postgres-url <postgres-url> --deployment growfi --chain-id 11155111 --rpc-url <rpc> --watch
 cargo run -p ugraph -- sync --manifest examples/growfi/subgraph.yaml --storage postgres --deployment growfi --postgres-url <postgres-url> --log-source postgres-feed --chain-id 11155111 --rpc-url <rpc>
-cargo run -p ugraph -- deploy --provider local --manifest examples/growfi/subgraph.yaml --storage postgres --postgres-url <postgres-url> --deployment growfi --chain-id 11155111 --rpc-url <rpc>
+cargo run -p ugraph -- users --postgres-url <postgres-url> create --email ops@example.com --role admin
+cargo run -p ugraph -- users --postgres-url <postgres-url> key create --email ops@example.com --name cli --scope deploy --scope query
+cargo run -p ugraph -- users --postgres-url <postgres-url> signup status
+cargo run -p ugraph -- users --postgres-url <postgres-url> signup disable
+cargo run -p ugraph -- deploy --provider local --manifest examples/growfi/subgraph.yaml --storage postgres --postgres-url <postgres-url> --deployment growfi --version v1 --visibility public --api-key <ugraph-api-key> --chain-id 11155111 --rpc-url <rpc>
+cargo run -p ugraph -- deployments --postgres-url <postgres-url> list
+cargo run -p ugraph -- deployments --postgres-url <postgres-url> set-visibility --deployment growfi --visibility private
 cargo run -p ugraph -- serve --storage postgres --deployment growfi --postgres-url <postgres-url> --port 8030
 cargo run -p ugraph -- doctor --manifest examples/growfi/subgraph.yaml
 docker build -t ugraph-core:local .
@@ -72,6 +78,7 @@ UGRAPH_RPC_RETRIES=3
 UGRAPH_RPC_TIMEOUT_SECS=15
 UGRAPH_DEPLOY_MAX_PASSES=8
 UGRAPH_SYNC_LIMIT=1000
+UGRAPH_API_KEY=
 UGRAPH_IPFS_GATEWAY=https://ipfs.io/ipfs/
 UGRAPH_IPFS_TIMEOUT_SECS=60
 UGRAPH_MAX_IPFS_FILE_BYTES=26214400
@@ -111,6 +118,9 @@ The image uses the same binary for the API and indexer:
   placeholder.
 - `UGRAPH_IPFS_TIMEOUT_SECS` and `UGRAPH_MAX_IPFS_FILE_BYTES` bound IPFS
   gateway calls.
+- `UGRAPH_API_KEY` authenticates CLI operations that record deployment
+  ownership and can also be sent to private query endpoints with
+  `Authorization: Bearer <key>` or `x-api-key`.
 
 `docker-compose.yml` starts Postgres, a shared `chain-reader`, a feed-backed
 indexer worker, and the API locally. The API reloads the selected store on each
@@ -131,6 +141,44 @@ when `--log-source postgres-feed` is selected, runs bounded `chain-reader` and
 `sync` passes until dynamically created data sources have been backfilled or
 `UGRAPH_DEPLOY_MAX_PASSES` is reached. It fails if the checkpoint remains
 incomplete, and leaves the API available through the normal `serve` command.
+When Postgres storage is used, `deploy` also records deployment metadata:
+version label, visibility, owner, and the API key that created or updated the
+deployment.
+
+## Users and API keys
+
+Postgres is the identity source for the core control plane. Users are keyed by
+normalized email and API keys are stored as hashes only; the secret is printed
+once when it is created.
+
+```bash
+ugraph users --postgres-url <postgres-url> create \
+  --email ops@example.com \
+  --display-name "Ops" \
+  --role admin
+
+ugraph users --postgres-url <postgres-url> key create \
+  --email ops@example.com \
+  --name cli \
+  --scope deploy \
+  --scope query
+
+UGRAPH_API_KEY=<ugraph-api-key> \
+ugraph deploy --provider local \
+  --manifest examples/growfi/subgraph.yaml \
+  --storage postgres \
+  --postgres-url <postgres-url> \
+  --deployment growfi \
+  --version v1 \
+  --visibility public
+```
+
+`users signup enable|disable|status` controls whether public user creation is
+allowed by future HTTP control-plane endpoints. The current default is
+disabled. Query serving uses deployment metadata: deployments marked `public`
+are open, deployments marked `private` require an API key with `query` scope.
+Deployments without metadata remain public so existing local and cloud
+instances are not locked out during upgrades.
 
 ## Current Scope
 
@@ -147,6 +195,8 @@ The first milestone is compatibility plumbing:
   logs keyed by `chain_id`.
 - Persist retained historical entity versions as compact delta rows with
   tombstones for removals.
+- Persist users, hashed API keys, public-signup configuration, and deployment
+  ownership metadata for CLI-driven deploys.
 - Run continuous current-state indexing with `sync --watch`.
 - Prevent two Postgres-backed indexers from syncing the same deployment
   concurrently with a session-level advisory lock.

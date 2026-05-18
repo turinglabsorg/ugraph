@@ -108,6 +108,16 @@
   chain-reader/sync passes when using `postgres-feed`, and only reports success
   when dynamically created data source subscriptions have been backfilled and
   the checkpoint is complete.
+- `core users` manages the initial control-plane identity model in Postgres:
+  users, hashed API keys, and the `public_user_signup` setting. Public signup
+  defaults to disabled.
+- `core deploy --provider local` records deployment metadata in Postgres when
+  available: version label, `public|private` visibility, owner user, and the
+  API key prefix used for the deploy. API keys with `deploy` scope can create
+  or update deploy metadata; private GraphQL deployments require a key with
+  `query` scope.
+- `core deployments` lists deployment ownership/version metadata and can change
+  a deployment's query visibility.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`
@@ -164,6 +174,9 @@
   rollback for reorgs.
 - Current implementation also has shared feed tables for subscriptions, raw
   blocks, and raw logs keyed by `chain_id`.
+- Current implementation has control-plane tables for users, hashed API keys,
+  public-signup settings, and deployment metadata. Keys are never stored in
+  plaintext; only the creation command prints the secret.
 - Live Sepolia buy smoke passed: tx
   `0x0ce83b9006ae4a7ce985505f6eee0e52b54d9ed07a0f0c4d76bee95bb1df3c25`,
   block `10866837`, 4 logs executed, 0 validation errors, local GraphQL matched
