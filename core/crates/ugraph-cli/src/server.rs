@@ -10,7 +10,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use crate::{
-    query::{execute_graphql_with_operation, query_needs_history, GraphqlHttpRequest},
+    query::{execute_graphql_with_context, query_needs_history, GraphqlHttpRequest},
     state::StoreSnapshot,
     storage::{self, SnapshotStore, StoreStatus},
 };
@@ -214,11 +214,12 @@ fn handle_graphql_get(
             let operation_name = params.get("operationName").map(String::as_str);
             return match load_snapshot_for_graphql(store, query, &variables, operation_name) {
                 Ok(snapshot) => {
-                    let response = execute_graphql_with_operation(
+                    let response = execute_graphql_with_context(
                         &snapshot,
                         query,
                         &variables,
                         operation_name,
+                        Some(deployment_name(store)),
                     );
                     write_json(stream, &response)
                 }
@@ -260,11 +261,12 @@ fn handle_graphql_post(
         payload._operation_name.as_deref(),
     ) {
         Ok(snapshot) => {
-            let response = execute_graphql_with_operation(
+            let response = execute_graphql_with_context(
                 &snapshot,
                 &payload.query,
                 &payload.variables,
                 payload._operation_name.as_deref(),
+                Some(deployment_name(store)),
             );
             write_json(stream, &response)
         }

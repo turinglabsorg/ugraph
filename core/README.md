@@ -304,8 +304,9 @@ current-state snapshot and rebuilds from the manifest start block. `serve`
 loads the selected store on every GraphQL request and exposes a
 GraphQL envelope plus the classic GraphiQL UI at `/graphql`, including filters,
 variables, nested relations, derived relations, historical `block: { number }`
-and `block: { hash }` selection, fragments, directives, `_meta.block.hash`, and
-introspection over the current-state entity model. `/status` is a small HTML
+and `block: { hash }` selection, fragments, directives, `_meta.block.hash`,
+`_meta.deployment`, and introspection over the current-state entity model.
+`/status` is a small HTML
 operational page, while `/metrics` exposes Prometheus gauges for store
 availability, entity count, history count, history block range, checkpoint
 block, completion state, and validation errors. Status endpoints use

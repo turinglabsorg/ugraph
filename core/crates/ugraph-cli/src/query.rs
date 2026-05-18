@@ -70,7 +70,17 @@ pub fn execute_graphql_with_operation(
     variables: &Value,
     operation_name: Option<&str>,
 ) -> Value {
-    match execute_query(snapshot, query, variables, operation_name) {
+    execute_graphql_with_context(snapshot, query, variables, operation_name, None)
+}
+
+pub fn execute_graphql_with_context(
+    snapshot: &StoreSnapshot,
+    query: &str,
+    variables: &Value,
+    operation_name: Option<&str>,
+    deployment: Option<&str>,
+) -> Value {
+    match execute_query(snapshot, query, variables, operation_name, deployment) {
         Ok(data) => json!({ "data": data }),
         Err(message) => json!({ "errors": [{ "message": message }] }),
     }
@@ -114,6 +124,7 @@ fn execute_query(
     query: &str,
     variables: &Value,
     operation_name: Option<&str>,
+    deployment: Option<&str>,
 ) -> Result<Value, String> {
     let query = strip_comments(query);
     let fragments = extract_fragments(&query)?;
@@ -123,7 +134,7 @@ fn execute_query(
     let mut data = Map::new();
 
     for field in fields {
-        let value = execute_root_field(snapshot, &field)?;
+        let value = execute_root_field(snapshot, &field, deployment)?;
         data.insert(field.response_name, value);
     }
 
@@ -151,7 +162,7 @@ fn validate_meta_fields(type_name: &str, fields: &[ParsedField]) -> Result<(), S
         match (type_name, field.name.as_str()) {
             (_, "__typename") => {}
             ("_Meta_", "block") => validate_meta_fields("_Block_", &field.selection)?,
-            ("_Meta_", "hasIndexingErrors") | ("_Block_", "hash" | "number") => {
+            ("_Meta_", "deployment" | "hasIndexingErrors") | ("_Block_", "hash" | "number") => {
                 if !field.selection.is_empty() {
                     return Err(format!(
                         "Field `{type_name}.{}` must not have a selection",
@@ -195,7 +206,11 @@ fn validate_entity_fields(
     Ok(())
 }
 
-fn execute_root_field(snapshot: &StoreSnapshot, field: &ParsedField) -> Result<Value, String> {
+fn execute_root_field(
+    snapshot: &StoreSnapshot,
+    field: &ParsedField,
+    deployment: Option<&str>,
+) -> Result<Value, String> {
     match field.name.as_str() {
         "__typename" => Ok(Value::String("Query".to_string())),
         "__schema" => Ok(project_json(
@@ -213,7 +228,7 @@ fn execute_root_field(snapshot: &StoreSnapshot, field: &ParsedField) -> Result<V
         "_meta" => {
             let selected = select_snapshot_for_field(snapshot, field)?;
             Ok(project_json(
-                &meta_value(selected.as_ref()),
+                &meta_value(selected.as_ref(), deployment),
                 &field.selection,
             ))
         }
@@ -852,7 +867,7 @@ fn is_plural_query(snapshot: &StoreSnapshot, query_name: &str) -> bool {
         .any(|name| query_name == plural_query_name(name))
 }
 
-fn meta_value(snapshot: &StoreSnapshot) -> Value {
+fn meta_value(snapshot: &StoreSnapshot, deployment: Option<&str>) -> Value {
     let hash = snapshot
         .checkpoint
         .block_hash
@@ -864,6 +879,7 @@ fn meta_value(snapshot: &StoreSnapshot) -> Value {
             "number": snapshot.checkpoint.to_block,
             "hash": hash
         },
+        "deployment": deployment.unwrap_or(&snapshot.manifest),
         "hasIndexingErrors": snapshot.checkpoint.validation_errors > 0
     })
 }
@@ -1100,6 +1116,7 @@ fn meta_type() -> Value {
         "description": Value::Null,
         "fields": [
             { "name": "block", "description": Value::Null, "args": [], "type": non_null_type_ref(named_output_type_ref_stub("OBJECT", "_Block_")), "isDeprecated": false, "deprecationReason": Value::Null },
+            { "name": "deployment", "description": Value::Null, "args": [], "type": non_null_type_ref(named_output_type_ref_stub("SCALAR", "String")), "isDeprecated": false, "deprecationReason": Value::Null },
             { "name": "hasIndexingErrors", "description": Value::Null, "args": [], "type": non_null_type_ref(named_output_type_ref_stub("SCALAR", "Boolean")), "isDeprecated": false, "deprecationReason": Value::Null }
         ],
         "inputFields": Value::Null,
@@ -2087,11 +2104,27 @@ mod tests {
         let snapshot = fixture_snapshot();
         let result = execute_graphql(
             &snapshot,
-            r#"{ _meta { block { number } } protocol(id: "0xabc") { id growToken } }"#,
+            r#"{ _meta { block { number } deployment } protocol(id: "0xabc") { id growToken } }"#,
         );
         assert_eq!(result["data"]["_meta"]["block"]["number"], 42);
+        assert_eq!(result["data"]["_meta"]["deployment"], "subgraph.yaml");
         assert_eq!(result["data"]["protocol"]["id"], "0xabc");
         assert_eq!(result["data"]["protocol"]["growToken"], "0xdef");
+    }
+
+    #[test]
+    fn serves_meta_deployment_from_runtime_context() {
+        let snapshot = fixture_snapshot();
+        let result = execute_graphql_with_context(
+            &snapshot,
+            r#"{ _meta { deployment hasIndexingErrors } }"#,
+            &Value::Null,
+            None,
+            Some("growfi"),
+        );
+
+        assert_eq!(result["data"]["_meta"]["deployment"], "growfi");
+        assert_eq!(result["data"]["_meta"]["hasIndexingErrors"], false);
     }
 
     #[test]

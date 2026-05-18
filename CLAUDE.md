@@ -44,6 +44,8 @@
   deployment; explicit versions must match registered deployment metadata.
 - GraphQL selection validation now rejects unknown entity/meta fields instead
   of projecting them as `null`, matching Graph Node/Goldsky error behavior.
+- `_meta.deployment` is exposed from the selected runtime deployment id, so
+  hosted-provider meta queries can select it alongside `_meta.block`.
 - `serve` keeps status endpoints lightweight: `/`, `/status`, `/healthz`, and
   `/metrics` read deployment counters/checkpoints without materializing
   retained history. GraphQL current-state queries also skip retained history;
