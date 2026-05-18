@@ -44,10 +44,13 @@
   to `https://turinglabs.org`. It lists public deployment metadata and the
   append-only entity change timeline from `ugraph_entity_changes`: block,
   emitted timestamp, explorer link, and created/updated/removed entities.
-  Blocks without entity changes are hidden by default, can be shown with
-  `show_empty=1`, and the view is paginated with `sync_page` and `sync_limit`.
-  This audit trail is separate from the retained history cache used for
-  historical GraphQL queries and rollback. When the API gets
+  Entity-change audit rows include `previous_data`; the UI must render
+  human-readable field summaries or before/after diffs instead of only raw
+  entity IDs. Legacy no-op rows where `data` equals the previous entity state
+  are pruned during migration. Blocks without entity changes are hidden by
+  default, can be shown with `show_empty=1`, and the view is paginated with
+  `sync_page` and `sync_limit`. This audit trail is separate from the retained
+  history cache used for historical GraphQL queries and rollback. When the API gets
   `UGRAPH_CHAIN_ID` or `UGRAPH_BLOCK_EXPLORER_URL`, sync rows link blocks to
   the correct explorer and show emitted timestamps for newly written
   checkpoints. GraphiQL is served from pinned React/GraphiQL assets, uses

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     thread,
@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Context;
 use serde_json::json;
+use ugraph_runtime::{EntityData, StoreValue};
 
 use crate::{
     query::{execute_graphql_with_context, query_needs_history, GraphqlHttpRequest},
@@ -808,9 +809,10 @@ fn home_html(
     .sync-count.updated {{ background:var(--blue); color:var(--void); }}
     .sync-count.removed {{ background:var(--hot); color:var(--void); }}
     .changes {{ display:flex; flex-wrap:wrap; gap:7px; }}
-    .change {{ max-width:100%; display:inline-flex; align-items:center; gap:7px; border:1px solid rgba(243,240,230,.36); padding:5px 7px; font-size:12px; }}
-    .change b {{ flex:0 0 auto; color:var(--muted); text-transform:uppercase; }}
-    .change code {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .change {{ max-width:100%; display:grid; grid-template-columns:auto minmax(120px, max-content); grid-template-areas:"action target" "summary summary"; column-gap:8px; row-gap:3px; border:1px solid rgba(243,240,230,.36); padding:6px 8px; font-size:12px; }}
+    .change b {{ grid-area:action; color:var(--muted); text-transform:uppercase; }}
+    .change-target {{ grid-area:target; color:var(--ink); font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .change code {{ grid-area:summary; min-width:0; color:#c8c1ad; white-space:normal; word-break:break-word; }}
     .change.created b {{ color:var(--acid); }}
     .change.updated b {{ color:var(--blue); }}
     .change.removed b {{ color:var(--hot); }}
@@ -1067,15 +1069,7 @@ fn sync_blocks_html(page: Option<&storage::SyncActivityPage>, options: &ServeOpt
                 let mut rows = activity
                     .changes
                     .iter()
-                    .map(|change| {
-                        let action = change.action.as_str();
-                        let target = format!("{}:{}", change.entity, change.id);
-                        format!(
-                            r#"<span class="change {action}"><b>{action}</b><code>{target}</code></span>"#,
-                            action = html_escape(action),
-                            target = html_escape(&target)
-                        )
-                    })
+                    .map(change_activity_html)
                     .collect::<Vec<_>>()
                     .join("");
                 if total_changes > activity.changes.len() {
@@ -1132,6 +1126,249 @@ fn sync_blocks_html(page: Option<&storage::SyncActivityPage>, options: &ServeOpt
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn change_activity_html(change: &storage::EntityChangeRecord) -> String {
+    let action = change.action.as_str();
+    let full_target = format!("{}:{}", change.entity, change.id);
+    let target = format!("{} {}", change.entity, short_identifier(&change.id));
+    let summary = change_summary(change);
+    format!(
+        concat!(
+            r#"<span class="change {action}" title="{title}">"#,
+            r#"<b>{action}</b>"#,
+            r#"<span class="change-target">{target}</span>"#,
+            r#"<code>{summary}</code>"#,
+            r#"</span>"#
+        ),
+        action = html_escape(action),
+        title = html_escape(&full_target),
+        target = html_escape(&target),
+        summary = html_escape(&summary)
+    )
+}
+
+fn change_summary(change: &storage::EntityChangeRecord) -> String {
+    match change.action {
+        storage::EntityChangeAction::Created => {
+            format!("created: {}", field_summary(&change.data, 4))
+        }
+        storage::EntityChangeAction::Updated => {
+            if let Some(previous_data) = change.previous_data.as_ref() {
+                let summary = diff_summary(previous_data, &change.data, 4);
+                if summary.is_empty() {
+                    "no field-level change".to_string()
+                } else {
+                    summary
+                }
+            } else {
+                format!("updated: {}", field_summary(&change.data, 4))
+            }
+        }
+        storage::EntityChangeAction::Removed => {
+            let data = change.previous_data.as_ref().unwrap_or(&change.data);
+            format!("removed: {}", field_summary(data, 4))
+        }
+    }
+}
+
+fn diff_summary(previous: &EntityData, current: &EntityData, limit: usize) -> String {
+    let mut keys = previous
+        .keys()
+        .chain(current.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|key| previous.get(key) != current.get(key))
+        .collect::<Vec<_>>();
+    sort_fields_by_readability(&mut keys);
+    let hidden = keys.len().saturating_sub(limit);
+    let mut fields = keys
+        .into_iter()
+        .take(limit)
+        .map(|key| {
+            let before = previous
+                .get(&key)
+                .map(format_store_value)
+                .unwrap_or_else(|| "null".to_string());
+            let after = current
+                .get(&key)
+                .map(format_store_value)
+                .unwrap_or_else(|| "null".to_string());
+            format!("{key}: {before} -> {after}")
+        })
+        .collect::<Vec<_>>();
+    if hidden > 0 {
+        fields.push(format!("+{hidden} fields"));
+    }
+    fields.join("; ")
+}
+
+fn field_summary(data: &EntityData, limit: usize) -> String {
+    if data.is_empty() {
+        return "no fields".to_string();
+    }
+    let mut keys = data.keys().cloned().collect::<Vec<_>>();
+    sort_fields_by_readability(&mut keys);
+    let hidden = keys.len().saturating_sub(limit);
+    let mut fields = keys
+        .into_iter()
+        .take(limit)
+        .filter_map(|key| {
+            data.get(&key)
+                .map(|value| format!("{key}={}", format_store_value(value)))
+        })
+        .collect::<Vec<_>>();
+    if hidden > 0 {
+        fields.push(format!("+{hidden} fields"));
+    }
+    fields.join(", ")
+}
+
+fn sort_fields_by_readability(fields: &mut [String]) {
+    fields.sort_by(|left, right| {
+        field_priority(left)
+            .cmp(&field_priority(right))
+            .then_with(|| left.cmp(right))
+    });
+}
+
+fn field_priority(field: &str) -> usize {
+    const PRIORITY: [&str; 33] = [
+        "name",
+        "symbol",
+        "status",
+        "state",
+        "user",
+        "owner",
+        "account",
+        "holder",
+        "buyer",
+        "seller",
+        "creator",
+        "recipient",
+        "campaign",
+        "pool",
+        "market",
+        "token",
+        "asset",
+        "amount",
+        "value",
+        "balance",
+        "total",
+        "price",
+        "rate",
+        "shares",
+        "count",
+        "timestamp",
+        "createdAt",
+        "updatedAt",
+        "txHash",
+        "transactionHash",
+        "hash",
+        "address",
+        "id",
+    ];
+    let normalized = field.to_ascii_lowercase();
+    PRIORITY
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(field))
+        .or_else(|| {
+            PRIORITY.iter().position(|candidate| {
+                *candidate != "id" && normalized.contains(&candidate.to_ascii_lowercase())
+            })
+        })
+        .unwrap_or(PRIORITY.len())
+}
+
+fn format_store_value(value: &StoreValue) -> String {
+    match value {
+        StoreValue::String(value) => short_string_value(value),
+        StoreValue::Bytes(value) => short_identifier(value),
+        StoreValue::Int(value) => value.to_string(),
+        StoreValue::BigDecimal { digits, exp } => {
+            let exponent = exp.parse::<i32>().unwrap_or_default();
+            if exponent == 0 {
+                compact_integer(digits)
+            } else {
+                format!("{}e{}", compact_integer(digits), exponent)
+            }
+        }
+        StoreValue::Bool(value) => value.to_string(),
+        StoreValue::Array(values) => {
+            let visible = values
+                .iter()
+                .take(3)
+                .map(format_store_value)
+                .collect::<Vec<_>>();
+            if values.len() > visible.len() {
+                format!(
+                    "[{}, +{}]",
+                    visible.join(", "),
+                    values.len() - visible.len()
+                )
+            } else {
+                format!("[{}]", visible.join(", "))
+            }
+        }
+        StoreValue::Null => "null".to_string(),
+        StoreValue::BigInt(value) => compact_integer(value),
+        StoreValue::Int8(value) | StoreValue::Timestamp(value) => value.to_string(),
+    }
+}
+
+fn short_string_value(value: &str) -> String {
+    if value.starts_with("0x") {
+        return short_identifier(value);
+    }
+    if value.len() <= 48 {
+        return value.to_string();
+    }
+    format!("{}...", value.chars().take(45).collect::<String>())
+}
+
+fn short_identifier(value: &str) -> String {
+    if value.len() <= 24 {
+        return value.to_string();
+    }
+    if value.starts_with("0x") && value.len() > 18 {
+        return format!("{}...{}", &value[..10], &value[value.len() - 6..]);
+    }
+    format!("{}...{}", &value[..14], &value[value.len() - 6..])
+}
+
+fn compact_integer(value: &str) -> String {
+    let trimmed = value.trim();
+    let negative = trimmed.starts_with('-');
+    let digits = trimmed.trim_start_matches('-').trim_start_matches('0');
+    if digits.is_empty() {
+        return "0".to_string();
+    }
+    if digits.len() <= 18 {
+        let mut grouped = String::new();
+        for (index, ch) in digits.chars().rev().enumerate() {
+            if index > 0 && index % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(ch);
+        }
+        let grouped = grouped.chars().rev().collect::<String>();
+        return if negative {
+            format!("-{grouped}")
+        } else {
+            grouped
+        };
+    }
+    let mut chars = digits.chars();
+    let first = chars.next().unwrap_or('0');
+    let decimals = chars.take(3).collect::<String>();
+    let prefix = if decimals.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first}.{decimals}")
+    };
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{prefix}e{}", digits.len() - 1)
 }
 
 fn block_link_html(block: u64, options: &ServeOptions) -> String {
@@ -1591,6 +1828,14 @@ mod tests {
                     entity: "Token".to_string(),
                     id: "0xabc".to_string(),
                     action: storage::EntityChangeAction::Updated,
+                    previous_data: Some(BTreeMap::from([(
+                        "amount".to_string(),
+                        StoreValue::BigInt("1000000000000000000".to_string()),
+                    )])),
+                    data: BTreeMap::from([(
+                        "amount".to_string(),
+                        StoreValue::BigInt("2000000000000000000".to_string()),
+                    )]),
                 }],
             }],
             stats: storage::SyncActivityStats {
@@ -1632,6 +1877,7 @@ mod tests {
         assert!(html.contains("/subgraphs/growfi/latest/gn"));
         assert!(html.contains("PUBLIC SUBGRAPHS"));
         assert!(html.contains("ENTITY CHANGES"));
+        assert!(html.contains("amount: 1.000e18 -&gt; 2.000e18"));
         assert!(html.contains("ops@ugraph.local"));
         assert!(html.contains("updated"));
         assert!(html.contains("Token:0xabc"));

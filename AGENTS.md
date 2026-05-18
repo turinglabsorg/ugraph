@@ -75,7 +75,9 @@
   keeps all retained snapshots. Postgres stores retained checkpoints and
   compact entity-version deltas in dedicated history tables. Entity-change
   audit rows are stored separately in `ugraph_entity_changes` and are not
-  pruned by `UGRAPH_HISTORY_LIMIT`.
+  pruned by `UGRAPH_HISTORY_LIMIT`. Audit rows include `previous_data` so the
+  status page can show human-readable field diffs; legacy no-op rows where
+  `data` equals the prior entity state are pruned during migration.
 - `core scan/sync` chunks `eth_getLogs` with `UGRAPH_MAX_BLOCK_RANGE`, retries
   transient RPC failures with `UGRAPH_RPC_RETRIES`, bounds individual requests
   with `UGRAPH_RPC_TIMEOUT_SECS`, and splits range-limit failures recursively.
@@ -97,11 +99,13 @@
   operational homepage, plus `/metrics` in Prometheus text format. The homepage
   should list all public deployment metadata for the instance and the
   append-only entity change timeline for the selected deployment, including
-  created/updated/removed entity deltas per block. Change blocks are paginated
-  with `sync_page` and `sync_limit`, and `show_empty=1` switches to indexed
-  checkpoints without requiring entity changes. When `UGRAPH_CHAIN_ID` or
-  `UGRAPH_BLOCK_EXPLORER_URL` is configured, each block links to the matching
-  explorer and newly synced checkpoints include the emitted block timestamp.
+  created/updated/removed entity deltas per block. Rows should show readable
+  field summaries or before/after diffs, not only raw entity IDs. Change blocks
+  are paginated with `sync_page` and `sync_limit`, and `show_empty=1` switches
+  to indexed checkpoints without requiring entity changes. When
+  `UGRAPH_CHAIN_ID` or `UGRAPH_BLOCK_EXPLORER_URL` is configured, each block
+  links to the matching explorer and newly synced checkpoints include the
+  emitted block timestamp.
 - `core serve` accepts hosted-provider compatible versioned query paths:
   `/subgraphs/<deployment>/<version>/gn` and
   `/subgraphs/<deployment>/<version>/graphql`. The deployment name must match
