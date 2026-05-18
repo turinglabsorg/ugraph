@@ -10,9 +10,9 @@ use anyhow::Context;
 use serde_json::json;
 
 use crate::{
-    query::{execute_graphql_with_operation, GraphqlHttpRequest},
+    query::{execute_graphql_with_operation, query_needs_history, GraphqlHttpRequest},
     state::StoreSnapshot,
-    storage::{self, SnapshotStore},
+    storage::{self, SnapshotStore, StoreStatus},
 };
 
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
@@ -93,8 +93,8 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
         return write_response(&mut stream, "204 No Content", "text/plain", b"");
     }
     if method == "GET" && (path == "/" || path == "/status") {
-        let (status, snapshot) = match store.load() {
-            Ok(snapshot) => ("200 OK", Some(snapshot)),
+        let (status, store_status) = match store.status() {
+            Ok(store_status) => ("200 OK", Some(store_status)),
             Err(_) => ("503 Service Unavailable", None),
         };
         let metadata = deployment_metadata_for_store(store).ok().flatten();
@@ -102,7 +102,7 @@ fn handle_store_connection(mut stream: TcpStream, store: &SnapshotStore) -> anyh
             &mut stream,
             status,
             "text/html; charset=utf-8",
-            home_html(store, snapshot.as_ref(), metadata.as_ref()).as_bytes(),
+            home_html(store, store_status.as_ref(), metadata.as_ref()).as_bytes(),
         );
     }
     if method == "GET" && path == "/healthz" {
@@ -207,17 +207,18 @@ fn handle_graphql_get(
             if !write_if_graphql_unauthorized(stream, store, headers)? {
                 return Ok(());
             }
-            return match store.load() {
+            let variables = params
+                .get("variables")
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let operation_name = params.get("operationName").map(String::as_str);
+            return match load_snapshot_for_graphql(store, query, &variables, operation_name) {
                 Ok(snapshot) => {
-                    let variables = params
-                        .get("variables")
-                        .and_then(|raw| serde_json::from_str(raw).ok())
-                        .unwrap_or(serde_json::Value::Null);
                     let response = execute_graphql_with_operation(
                         &snapshot,
                         query,
                         &variables,
-                        params.get("operationName").map(String::as_str),
+                        operation_name,
                     );
                     write_json(stream, &response)
                 }
@@ -252,7 +253,12 @@ fn handle_graphql_post(
             variables: serde_json::Value::Null,
             _operation_name: None,
         });
-    match store.load() {
+    match load_snapshot_for_graphql(
+        store,
+        &payload.query,
+        &payload.variables,
+        payload._operation_name.as_deref(),
+    ) {
         Ok(snapshot) => {
             let response = execute_graphql_with_operation(
                 &snapshot,
@@ -267,6 +273,19 @@ fn handle_graphql_post(
             "503 Service Unavailable",
             &json!({ "errors": [{ "message": error.to_string() }] }),
         ),
+    }
+}
+
+fn load_snapshot_for_graphql(
+    store: &SnapshotStore,
+    query: &str,
+    variables: &serde_json::Value,
+    operation_name: Option<&str>,
+) -> anyhow::Result<StoreSnapshot> {
+    if query_needs_history(query, variables, operation_name) {
+        store.load()
+    } else {
+        store.load_current()
     }
 }
 
@@ -297,21 +316,21 @@ fn write_if_graphql_unauthorized(
 }
 
 fn write_healthz(stream: &mut TcpStream, store: &SnapshotStore) -> anyhow::Result<()> {
-    match store.load() {
-        Ok(snapshot) => write_json(
+    match store.status() {
+        Ok(status) => write_json(
             stream,
             &json!({
                 "ok": true,
                 "store": store.label(),
-                "entities": snapshot.entities.len(),
-                "dynamicSources": snapshot.dynamic_sources.len(),
-                "historySnapshots": snapshot.history.len(),
-                "historyEarliestBlock": history_earliest_block(&snapshot),
-                "historyLatestBlock": history_latest_block(&snapshot),
-                "toBlock": snapshot.checkpoint.to_block,
-                "blockHash": snapshot.checkpoint.block_hash,
-                "complete": snapshot.checkpoint.complete,
-                "validationErrors": snapshot.checkpoint.validation_errors,
+                "entities": status.entities,
+                "dynamicSources": status.dynamic_sources,
+                "historySnapshots": status.history_snapshots,
+                "historyEarliestBlock": status.history_earliest_block,
+                "historyLatestBlock": status.history_latest_block,
+                "toBlock": status.checkpoint.to_block,
+                "blockHash": status.checkpoint.block_hash,
+                "complete": status.checkpoint.complete,
+                "validationErrors": status.checkpoint.validation_errors,
             }),
         ),
         Err(error) => write_json_status(
@@ -327,12 +346,12 @@ fn write_healthz(stream: &mut TcpStream, store: &SnapshotStore) -> anyhow::Resul
 }
 
 fn write_metrics(stream: &mut TcpStream, store: &SnapshotStore) -> anyhow::Result<()> {
-    match store.load() {
-        Ok(snapshot) => write_response(
+    match store.status() {
+        Ok(status) => write_response(
             stream,
             "200 OK",
             "text/plain; version=0.0.4; charset=utf-8",
-            metrics_text(store, &snapshot).as_bytes(),
+            metrics_text(store, &status).as_bytes(),
         ),
         Err(_) => write_response(
             stream,
@@ -474,9 +493,9 @@ fn deployment_metadata_for_store(
     }
 }
 
-fn metrics_text(store: &SnapshotStore, snapshot: &StoreSnapshot) -> String {
+fn metrics_text(store: &SnapshotStore, status: &StoreStatus) -> String {
     let store = prometheus_label_value(&store.label());
-    let complete = usize::from(snapshot.checkpoint.complete);
+    let complete = usize::from(status.checkpoint.complete);
     format!(
         concat!(
             "# HELP ugraph_store_up Whether the selected store can be loaded.\n",
@@ -508,14 +527,14 @@ fn metrics_text(store: &SnapshotStore, snapshot: &StoreSnapshot) -> String {
             "ugraph_validation_errors{{store=\"{store}\"}} {validation_errors}\n"
         ),
         store = store,
-        entities = snapshot.entities.len(),
-        dynamic_sources = snapshot.dynamic_sources.len(),
-        history_snapshots = snapshot.history.len(),
-        history_earliest_block = history_earliest_block(snapshot).unwrap_or(0),
-        history_latest_block = history_latest_block(snapshot).unwrap_or(0),
-        to_block = snapshot.checkpoint.to_block,
+        entities = status.entities,
+        dynamic_sources = status.dynamic_sources,
+        history_snapshots = status.history_snapshots,
+        history_earliest_block = status.history_earliest_block.unwrap_or(0),
+        history_latest_block = status.history_latest_block.unwrap_or(0),
+        to_block = status.checkpoint.to_block,
         complete = complete,
-        validation_errors = snapshot.checkpoint.validation_errors
+        validation_errors = status.checkpoint.validation_errors
     )
 }
 
@@ -540,13 +559,13 @@ fn prometheus_label_value(value: &str) -> String {
 
 fn home_html(
     store: &SnapshotStore,
-    snapshot: Option<&StoreSnapshot>,
+    status: Option<&StoreStatus>,
     metadata: Option<&storage::DeploymentMetadataRecord>,
 ) -> String {
-    let ok = snapshot
-        .map(|snapshot| snapshot.checkpoint.complete && snapshot.checkpoint.validation_errors == 0)
+    let ok = status
+        .map(|status| status.checkpoint.complete && status.checkpoint.validation_errors == 0)
         .unwrap_or(false);
-    let status = if ok { "OPERATIONAL" } else { "DEGRADED" };
+    let display_status = if ok { "OPERATIONAL" } else { "DEGRADED" };
     let badge = if ok { "ok" } else { "down" };
     let deployment = deployment_name(store);
     let version = metadata
@@ -557,32 +576,31 @@ fn home_html(
         .unwrap_or("public");
     let versioned_endpoint = format!("/subgraphs/{deployment}/{version}/gn");
     let latest_endpoint = format!("/subgraphs/{deployment}/latest/gn");
-    let to_block = snapshot
-        .map(|snapshot| snapshot.checkpoint.to_block.to_string())
+    let to_block = status
+        .map(|status| status.checkpoint.to_block.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let block_hash = snapshot
-        .and_then(|snapshot| snapshot.checkpoint.block_hash.as_deref())
+    let block_hash = status
+        .and_then(|status| status.checkpoint.block_hash.as_deref())
         .unwrap_or("-");
-    let entities = snapshot
-        .map(|snapshot| snapshot.entities.len().to_string())
+    let entities = status
+        .map(|status| status.entities.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let dynamic_sources = snapshot
-        .map(|snapshot| snapshot.dynamic_sources.len().to_string())
+    let dynamic_sources = status
+        .map(|status| status.dynamic_sources.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let history = snapshot
-        .map(|snapshot| snapshot.history.len().to_string())
+    let history = status
+        .map(|status| status.history_snapshots.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let history_range = snapshot
-        .and_then(|snapshot| {
+    let history_range = status
+        .and_then(|status| {
             Some(format!(
                 "{}-{}",
-                history_earliest_block(snapshot)?,
-                history_latest_block(snapshot)?
+                status.history_earliest_block?, status.history_latest_block?
             ))
         })
         .unwrap_or_else(|| "-".to_string());
-    let validation_errors = snapshot
-        .map(|snapshot| snapshot.checkpoint.validation_errors.to_string())
+    let validation_errors = status
+        .map(|status| status.checkpoint.validation_errors.to_string())
         .unwrap_or_else(|| "-".to_string());
     format!(
         r#"<!doctype html>
@@ -681,7 +699,7 @@ fn home_html(
 </html>"#,
         store = html_escape(&store.label()),
         badge = badge,
-        status = status,
+        status = display_status,
         deployment = html_escape(deployment),
         version = html_escape(version),
         visibility = html_escape(visibility),
@@ -701,22 +719,6 @@ fn home_html(
             "attention required"
         }
     )
-}
-
-fn history_earliest_block(snapshot: &StoreSnapshot) -> Option<u64> {
-    snapshot
-        .history
-        .iter()
-        .map(|entry| entry.checkpoint.to_block)
-        .min()
-}
-
-fn history_latest_block(snapshot: &StoreSnapshot) -> Option<u64> {
-    snapshot
-        .history
-        .iter()
-        .map(|entry| entry.checkpoint.to_block)
-        .max()
 }
 
 fn html_escape(value: &str) -> String {
@@ -919,8 +921,6 @@ fn graphiql_html(endpoint: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ugraph_core::EntitySchema;
-
     use super::*;
     use crate::state::SyncCheckpoint;
 
@@ -930,9 +930,7 @@ mod tests {
             url: "postgres://example".to_string(),
             deployment: "growfi".to_string(),
         };
-        let snapshot = StoreSnapshot {
-            version: 1,
-            manifest: "subgraph.yaml".to_string(),
+        let status = StoreStatus {
             checkpoint: SyncCheckpoint {
                 from_block: Some(10),
                 to_block: 42,
@@ -942,14 +940,14 @@ mod tests {
                 validation_errors: 1,
                 complete: true,
             },
-            schema: EntitySchema::default(),
-            entities: Vec::new(),
-            dynamic_sources: Vec::new(),
-            processed_logs: Vec::new(),
-            history: Vec::new(),
+            entities: 0,
+            dynamic_sources: 0,
+            history_snapshots: 0,
+            history_earliest_block: None,
+            history_latest_block: None,
         };
 
-        let metrics = metrics_text(&store, &snapshot);
+        let metrics = metrics_text(&store, &status);
 
         assert!(metrics.contains(r#"ugraph_store_up{store="postgres:growfi"} 1"#));
         assert!(metrics.contains(r#"ugraph_checkpoint_to_block{store="postgres:growfi"} 42"#));
@@ -1016,9 +1014,7 @@ mod tests {
             url: "postgres://example".to_string(),
             deployment: "growfi".to_string(),
         };
-        let snapshot = StoreSnapshot {
-            version: 1,
-            manifest: "subgraph.yaml".to_string(),
+        let status = StoreStatus {
             checkpoint: SyncCheckpoint {
                 from_block: Some(10),
                 to_block: 42,
@@ -1028,11 +1024,11 @@ mod tests {
                 validation_errors: 0,
                 complete: true,
             },
-            schema: EntitySchema::default(),
-            entities: Vec::new(),
-            dynamic_sources: Vec::new(),
-            processed_logs: Vec::new(),
-            history: Vec::new(),
+            entities: 0,
+            dynamic_sources: 0,
+            history_snapshots: 0,
+            history_earliest_block: None,
+            history_latest_block: None,
         };
         let metadata = storage::DeploymentMetadataRecord {
             deployment: "growfi".to_string(),
@@ -1046,7 +1042,7 @@ mod tests {
             updated_at: "now".to_string(),
         };
 
-        let html = home_html(&store, Some(&snapshot), Some(&metadata));
+        let html = home_html(&store, Some(&status), Some(&metadata));
 
         assert!(html.contains("OPERATIONAL"));
         assert!(html.contains("/subgraphs/growfi/4.0.2/gn"));

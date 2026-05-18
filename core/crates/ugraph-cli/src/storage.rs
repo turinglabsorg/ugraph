@@ -97,6 +97,16 @@ pub struct DeploymentMetadataRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct StoreStatus {
+    pub checkpoint: SyncCheckpoint,
+    pub entities: usize,
+    pub dynamic_sources: usize,
+    pub history_snapshots: usize,
+    pub history_earliest_block: Option<u64>,
+    pub history_latest_block: Option<u64>,
+}
+
 impl SnapshotStore {
     pub fn label(&self) -> String {
         match self {
@@ -111,8 +121,25 @@ impl SnapshotStore {
             Self::Postgres { url, deployment } => {
                 let mut client = connect(url)?;
                 migrate(&mut client)?;
-                load_postgres_snapshot(&mut client, deployment)?
+                load_postgres_snapshot(&mut client, deployment, true)?
                     .with_context(|| format!("loading postgres snapshot `{deployment}`"))
+            }
+        }
+    }
+
+    pub fn load_current(&self) -> anyhow::Result<StoreSnapshot> {
+        match self {
+            Self::Json { path } => {
+                let mut snapshot = load_snapshot(path)?;
+                snapshot.processed_logs = Vec::new();
+                snapshot.history = Vec::new();
+                Ok(snapshot)
+            }
+            Self::Postgres { url, deployment } => {
+                let mut client = connect(url)?;
+                migrate(&mut client)?;
+                load_postgres_snapshot(&mut client, deployment, false)?
+                    .with_context(|| format!("loading postgres current snapshot `{deployment}`"))
             }
         }
     }
@@ -123,7 +150,37 @@ impl SnapshotStore {
             Self::Postgres { url, deployment } => {
                 let mut client = connect(url)?;
                 migrate(&mut client)?;
-                load_postgres_snapshot(&mut client, deployment)
+                load_postgres_snapshot(&mut client, deployment, true)
+            }
+        }
+    }
+
+    pub fn status(&self) -> anyhow::Result<StoreStatus> {
+        match self {
+            Self::Json { path } => {
+                let snapshot = load_snapshot(path)?;
+                Ok(StoreStatus {
+                    checkpoint: snapshot.checkpoint,
+                    entities: snapshot.entities.len(),
+                    dynamic_sources: snapshot.dynamic_sources.len(),
+                    history_snapshots: snapshot.history.len(),
+                    history_earliest_block: snapshot
+                        .history
+                        .iter()
+                        .map(|entry| entry.checkpoint.to_block)
+                        .min(),
+                    history_latest_block: snapshot
+                        .history
+                        .iter()
+                        .map(|entry| entry.checkpoint.to_block)
+                        .max(),
+                })
+            }
+            Self::Postgres { url, deployment } => {
+                let mut client = connect(url)?;
+                migrate(&mut client)?;
+                load_postgres_status(&mut client, deployment)?
+                    .with_context(|| format!("loading postgres status `{deployment}`"))
             }
         }
     }
@@ -572,6 +629,7 @@ fn migrate(client: &mut Client) -> anyhow::Result<()> {
 fn load_postgres_snapshot(
     client: &mut Client,
     deployment: &str,
+    include_history: bool,
 ) -> anyhow::Result<Option<StoreSnapshot>> {
     let Some(row) = client.query_opt(
         "select version, manifest, checkpoint, schema, history from ugraph_deployments where id = $1",
@@ -589,13 +647,17 @@ fn load_postgres_snapshot(
         serde_json::from_value(checkpoint_value).context("decoding postgres checkpoint")?;
     let schema: EntitySchema =
         serde_json::from_value(schema_value).context("decoding postgres schema")?;
-    let legacy_history: Vec<HistoricalSnapshot> =
-        serde_json::from_value(history_value).context("decoding postgres history")?;
-    let stored_history = load_postgres_history(client, deployment)?;
-    let history = if stored_history.is_empty() {
-        legacy_history
+    let history = if include_history {
+        let legacy_history: Vec<HistoricalSnapshot> =
+            serde_json::from_value(history_value).context("decoding postgres history")?;
+        let stored_history = load_postgres_history(client, deployment)?;
+        if stored_history.is_empty() {
+            legacy_history
+        } else {
+            stored_history
+        }
     } else {
-        stored_history
+        Vec::new()
     };
 
     let entities = client
@@ -641,28 +703,34 @@ fn load_postgres_snapshot(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let processed_logs = client
-        .query(
-            "select source, template, address, block_number, transaction_index, log_index, topic0 from ugraph_processed_logs where deployment = $1 order by block_number, transaction_index, log_index",
-            &[&deployment],
-        )?
-        .into_iter()
-        .map(|row| {
-            let block_number: i64 = row.get("block_number");
-            let transaction_index: i64 = row.get("transaction_index");
-            let log_index: i64 = row.get("log_index");
-            Ok(ProcessedLogSnapshot {
-                source: row.get("source"),
-                template: row.get("template"),
-                address: row.get("address"),
-                block_number: u64::try_from(block_number).context("processed log block is negative")?,
-                transaction_index: u64::try_from(transaction_index)
-                    .context("processed log transaction index is negative")?,
-                log_index: u64::try_from(log_index).context("processed log index is negative")?,
-                topic0: row.get("topic0"),
+    let processed_logs = if include_history {
+        client
+            .query(
+                "select source, template, address, block_number, transaction_index, log_index, topic0 from ugraph_processed_logs where deployment = $1 order by block_number, transaction_index, log_index",
+                &[&deployment],
+            )?
+            .into_iter()
+            .map(|row| {
+                let block_number: i64 = row.get("block_number");
+                let transaction_index: i64 = row.get("transaction_index");
+                let log_index: i64 = row.get("log_index");
+                Ok(ProcessedLogSnapshot {
+                    source: row.get("source"),
+                    template: row.get("template"),
+                    address: row.get("address"),
+                    block_number: u64::try_from(block_number)
+                        .context("processed log block is negative")?,
+                    transaction_index: u64::try_from(transaction_index)
+                        .context("processed log transaction index is negative")?,
+                    log_index: u64::try_from(log_index)
+                        .context("processed log index is negative")?,
+                    topic0: row.get("topic0"),
+                })
             })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
 
     Ok(Some(StoreSnapshot {
         version: u32::try_from(version).context("snapshot version is negative")?,
@@ -674,6 +742,58 @@ fn load_postgres_snapshot(
         processed_logs,
         history,
     }))
+}
+
+fn load_postgres_status(
+    client: &mut Client,
+    deployment: &str,
+) -> anyhow::Result<Option<StoreStatus>> {
+    let Some(row) = client.query_opt(
+        "select checkpoint from ugraph_deployments where id = $1",
+        &[&deployment],
+    )?
+    else {
+        return Ok(None);
+    };
+    let checkpoint_value: Value = row.get("checkpoint");
+    let checkpoint: SyncCheckpoint =
+        serde_json::from_value(checkpoint_value).context("decoding postgres checkpoint")?;
+    let entity_row = client.query_one(
+        "select count(*)::bigint from ugraph_entities where deployment = $1",
+        &[&deployment],
+    )?;
+    let entities = count_usize(&entity_row, 0)?;
+    let dynamic_source_row = client.query_one(
+        "select count(*)::bigint from ugraph_dynamic_sources where deployment = $1",
+        &[&deployment],
+    )?;
+    let dynamic_sources = count_usize(&dynamic_source_row, 0)?;
+    let history_row = client.query_one(
+        "select count(*)::bigint, min(block_number), max(block_number) from ugraph_history_snapshots where deployment = $1",
+        &[&deployment],
+    )?;
+    let history_snapshots = count_usize(&history_row, 0)?;
+    let history_earliest_block = optional_u64(history_row.get::<_, Option<i64>>(1))?;
+    let history_latest_block = optional_u64(history_row.get::<_, Option<i64>>(2))?;
+    Ok(Some(StoreStatus {
+        checkpoint,
+        entities,
+        dynamic_sources,
+        history_snapshots,
+        history_earliest_block,
+        history_latest_block,
+    }))
+}
+
+fn count_usize(row: &postgres::Row, column: usize) -> anyhow::Result<usize> {
+    let count: i64 = row.get(column);
+    usize::try_from(count).context("postgres count is negative")
+}
+
+fn optional_u64(value: Option<i64>) -> anyhow::Result<Option<u64>> {
+    value
+        .map(|value| u64::try_from(value).context("postgres block is negative"))
+        .transpose()
 }
 
 fn write_postgres_snapshot(

@@ -128,7 +128,9 @@ The image uses the same binary for the API and indexer:
 `docker-compose.yml` starts Postgres, a shared `chain-reader`, a feed-backed
 indexer worker, and the API locally. The API reloads the selected store on each
 GraphQL request, so writes committed by the indexer are visible without
-restarting the server.
+restarting the server. Current-state GraphQL queries skip retained history and
+processed-log cursors; those rows are loaded only when a query contains a
+historical `block:` argument.
 
 Production should evolve toward a shared chain feed. Instead of every subgraph
 deployment calling `eth_getLogs` for the same chain, one `chain-reader` per
@@ -306,7 +308,9 @@ and `block: { hash }` selection, fragments, directives, `_meta.block.hash`, and
 introspection over the current-state entity model. `/status` is a small HTML
 operational page, while `/metrics` exposes Prometheus gauges for store
 availability, entity count, history count, history block range, checkpoint
-block, completion state, and validation errors.
+block, completion state, and validation errors. Status endpoints use
+lightweight Postgres counter/checkpoint queries and do not materialize retained
+history.
 
 ## Heavy Subgraph Fixture
 

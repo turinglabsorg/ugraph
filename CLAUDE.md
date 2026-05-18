@@ -44,6 +44,10 @@
   deployment; explicit versions must match registered deployment metadata.
 - GraphQL selection validation now rejects unknown entity/meta fields instead
   of projecting them as `null`, matching Graph Node/Goldsky error behavior.
+- `serve` keeps status endpoints lightweight: `/`, `/status`, `/healthz`, and
+  `/metrics` read deployment counters/checkpoints without materializing
+  retained history. GraphQL current-state queries also skip retained history;
+  history is loaded only when the query contains a `block:` argument.
 - RPC, Chainlist registry, and mapping `ethereum.call` requests are bounded by
   `UGRAPH_RPC_TIMEOUT_SECS`.
 - When no explicit RPC is configured, `chain-reader` tries all resolved

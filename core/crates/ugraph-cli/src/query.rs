@@ -89,6 +89,26 @@ pub fn normalize_json(value: &Value) -> Value {
     }
 }
 
+pub fn query_needs_history(query: &str, variables: &Value, operation_name: Option<&str>) -> bool {
+    let query = strip_comments(query);
+    let Ok(fragments) = extract_fragments(&query) else {
+        return false;
+    };
+    let Ok(body) = operation_body(&query, operation_name) else {
+        return false;
+    };
+    let Ok(fields) = parse_fields(&body, variables, &fragments) else {
+        return false;
+    };
+    fields_have_block_arg(&fields)
+}
+
+fn fields_have_block_arg(fields: &[ParsedField]) -> bool {
+    fields
+        .iter()
+        .any(|field| field.args.contains_key("block") || fields_have_block_arg(&field.selection))
+}
+
 fn execute_query(
     snapshot: &StoreSnapshot,
     query: &str,
@@ -2094,6 +2114,25 @@ mod tests {
         );
         assert_eq!(result["data"]["protocol"]["owner"]["name"], "Alice");
         assert_eq!(result["data"]["protocol"]["purchases"][0]["amount"], "12");
+    }
+
+    #[test]
+    fn detects_queries_that_need_historical_snapshots() {
+        assert!(!query_needs_history(
+            r#"{ purchases(first: 1) { id block } }"#,
+            &Value::Null,
+            None
+        ));
+        assert!(query_needs_history(
+            r#"{ _meta(block: { number: 20 }) { block { number } } }"#,
+            &Value::Null,
+            None
+        ));
+        assert!(query_needs_history(
+            r#"{ protocol(id: "0xabc", block: { number: 20 }) { id name } }"#,
+            &Value::Null,
+            None
+        ));
     }
 
     #[test]

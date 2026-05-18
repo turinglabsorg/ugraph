@@ -81,8 +81,14 @@
   rewinds to the newest matching block.
 - `core sync` holds a Postgres advisory lock for the selected deployment so
   two indexers cannot write the same single-subgraph instance concurrently.
-- `core serve` reloads the selected store on each GraphQL/health request, so
-  API containers see indexer writes committed to Postgres without restart.
+- `core serve` reloads the selected store on each GraphQL request, so API
+  containers see indexer writes committed to Postgres without restart. Current
+  queries load only current-state rows; retained history and processed-log
+  cursors are loaded only when a GraphQL query explicitly uses a `block:`
+  argument.
+- `/`, `/status`, `/healthz`, and `/metrics` use lightweight Postgres status
+  queries instead of materializing entity history, so operational checks stay
+  responsive while the indexer is writing.
 - `core serve` exposes `/` and `/status` as the public terminal-style
   operational homepage, plus `/metrics` in Prometheus text format.
 - `core serve` accepts hosted-provider compatible versioned query paths:
