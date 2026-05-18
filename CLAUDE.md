@@ -2,6 +2,10 @@
 
 ## Architecture Updates
 
+- The Rust workspace now lives at the repository root. `core/` owns libraries,
+  fixtures, docs, and Docker runtime assets; `cli/` owns the `ugraph` binary.
+  Run Cargo commands from the repository root and reference GrowFi fixtures as
+  `core/examples/growfi/...`.
 - Production uses a shared multi-chain feed, not one RPC scanner per subgraph.
 - Run one `chain-reader` per `chain_id`. Each reader owns RPC polling for that
   chain and writes raw blocks/logs to Postgres.
