@@ -2603,6 +2603,19 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         known_dynamic_sources,
         processed_logs,
     })?;
+    if let Some(previous) = previous.as_ref() {
+        if should_keep_previous_checkpoint(
+            previous,
+            from_block,
+            run.report.to_block,
+            run.complete,
+            run.report.executed_logs,
+            run.report.validation_errors,
+            input.to_block,
+        ) {
+            return Ok(previous.clone());
+        }
+    }
     let checkpoint = SyncCheckpoint {
         from_block: run.report.from_block,
         to_block: run.report.to_block,
@@ -2643,6 +2656,24 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         input.reset,
     )?;
     Ok(snapshot)
+}
+
+fn should_keep_previous_checkpoint(
+    previous: &state::StoreSnapshot,
+    started_from_block: Option<u64>,
+    report_to_block: u64,
+    complete: bool,
+    executed_logs: usize,
+    validation_errors: usize,
+    explicit_to_block: Option<u64>,
+) -> bool {
+    explicit_to_block.is_none()
+        && previous.checkpoint.complete
+        && complete
+        && executed_logs == 0
+        && validation_errors == 0
+        && report_to_block <= previous.checkpoint.to_block
+        && started_from_block.is_some_and(|from_block| from_block > report_to_block)
 }
 
 fn sync_start_block(
@@ -3342,6 +3373,47 @@ mod tests {
             sync_start_block(Some(100), Some(&incomplete), false),
             Some(50)
         );
+    }
+
+    #[test]
+    fn sync_keeps_previous_checkpoint_when_rpc_head_is_not_newer() {
+        let previous = test_snapshot(true, 0);
+        assert!(should_keep_previous_checkpoint(
+            &previous,
+            Some(3),
+            2,
+            true,
+            0,
+            0,
+            None
+        ));
+        assert!(!should_keep_previous_checkpoint(
+            &previous,
+            Some(3),
+            4,
+            true,
+            0,
+            0,
+            None
+        ));
+        assert!(!should_keep_previous_checkpoint(
+            &previous,
+            Some(3),
+            2,
+            true,
+            1,
+            0,
+            None
+        ));
+        assert!(!should_keep_previous_checkpoint(
+            &previous,
+            Some(3),
+            2,
+            true,
+            0,
+            0,
+            Some(2)
+        ));
     }
 
     fn test_snapshot(complete: bool, validation_errors: usize) -> StoreSnapshot {

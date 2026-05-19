@@ -66,7 +66,9 @@
   and retries with capped exponential backoff. A configured `from_block` is the
   initial deployment start block only; after a complete checkpoint exists,
   watch mode must resume from `checkpoint.to_block + 1` unless `--reset` is
-  explicitly used.
+  explicitly used. If the selected RPC reports a head that is not newer than
+  the current complete checkpoint, the previous checkpoint is kept instead of
+  writing an empty inverted range.
 - `core replay/sync` uses a per-run WASM module cache so each distinct mapping
   WASM is compiled once, then instantiated per log. Handler writes run against
   candidate store/cache state and commit only after schema validation passes,
@@ -94,7 +96,8 @@
   containers see indexer writes committed to Postgres without restart. Current
   queries load only current-state rows; retained history and processed-log
   cursors are loaded only when a GraphQL query explicitly uses a `block:`
-  argument.
+  argument. Client disconnects such as broken pipes are ignored in request
+  logging because they are not API/indexing failures.
 - `/`, `/status`, `/healthz`, and `/metrics` use lightweight Postgres status
   queries instead of materializing entity history, so operational checks stay
   responsive while the indexer is writing.

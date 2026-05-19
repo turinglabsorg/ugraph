@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     thread,
     time::Duration,
@@ -91,6 +91,9 @@ pub fn serve_store(
 
 fn log_connection_error(result: anyhow::Result<()>, store: &SnapshotStore) {
     if let Err(error) = result {
+        if is_client_disconnect(&error) {
+            return;
+        }
         eprintln!(
             "{}",
             json!({
@@ -101,6 +104,21 @@ fn log_connection_error(result: anyhow::Result<()>, store: &SnapshotStore) {
             })
         );
     }
+}
+
+fn is_client_disconnect(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| {
+                matches!(
+                    io_error.kind(),
+                    ErrorKind::BrokenPipe
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                )
+            })
+    })
 }
 
 fn handle_store_connection(
@@ -1736,6 +1754,19 @@ mod tests {
             prometheus_label_value("a\"b\\c\nd"),
             r#"a\"b\\c\nd"#.to_string()
         );
+    }
+
+    #[test]
+    fn client_disconnect_errors_are_ignored() {
+        let broken_pipe =
+            anyhow::Error::new(std::io::Error::from(ErrorKind::BrokenPipe)).context("write");
+        let connection_reset =
+            anyhow::Error::new(std::io::Error::from(ErrorKind::ConnectionReset)).context("write");
+        let other = anyhow::anyhow!("database unavailable");
+
+        assert!(is_client_disconnect(&broken_pipe));
+        assert!(is_client_disconnect(&connection_reset));
+        assert!(!is_client_disconnect(&other));
     }
 
     #[test]

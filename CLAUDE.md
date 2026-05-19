@@ -87,7 +87,11 @@
 - `UGRAPH_FROM_BLOCK` is the initial deployment start block only. Once a
   complete checkpoint exists, the watch indexer resumes from
   `checkpoint.to_block + 1`; use `--reset`/`UGRAPH_RESET=true` for an explicit
-  rebuild from the configured start block.
+  rebuild from the configured start block. If the RPC head is equal to or
+  behind the stored complete checkpoint, keep the previous checkpoint and do
+  not write an empty inverted checkpoint range.
+- API logs intentionally ignore client disconnects such as broken pipes; they
+  are normal HTTP aborts, not indexing or GraphQL execution failures.
 - Keep provider wiring out of the core runtime. DigitalOcean is a likely target,
   but the core container should stay portable.
 - Lowest-cost deploy target is now `infra/gcp/e2-micro`: one Google Compute

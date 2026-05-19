@@ -2281,6 +2281,10 @@ left join (
 ) v on v.deployment = h.deployment and v.block_number = h.block_number
 on conflict (deployment, block_number) do nothing;
 
+delete from ugraph_sync_checkpoints
+where from_block is not null
+  and from_block > block_number;
+
 insert into ugraph_entity_changes (
   deployment, block_number, block_hash, block_timestamp,
   entity, id, action, data, previous_data, updated_at
@@ -2413,7 +2417,11 @@ create index if not exists ugraph_raw_logs_lookup
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, env};
+    use std::{
+        collections::BTreeMap,
+        env,
+        sync::{Mutex, MutexGuard, OnceLock},
+    };
 
     use ugraph_core::{
         EntityField, EntitySchema, EntityType, EventTriggerPlan, RawEthereumLog, SourcePlan,
@@ -2421,6 +2429,15 @@ mod tests {
     use ugraph_runtime::{EntityData, StoreValue};
 
     use super::*;
+
+    static POSTGRES_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn postgres_test_guard() -> MutexGuard<'static, ()> {
+        POSTGRES_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("postgres test lock poisoned")
+    }
 
     #[test]
     fn postgres_schema_contains_current_state_tables() {
@@ -2471,6 +2488,7 @@ mod tests {
         let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
             return Ok(());
         };
+        let _guard = postgres_test_guard();
         let deployment = format!("ugraph_test_{}", std::process::id());
         let store = SnapshotStore::Postgres {
             url: url.clone(),
@@ -2494,6 +2512,7 @@ mod tests {
         let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
             return Ok(());
         };
+        let _guard = postgres_test_guard();
         let deployment = format!("ugraph_activity_test_{}", std::process::id());
         let store = SnapshotStore::Postgres {
             url: url.clone(),
@@ -2619,6 +2638,7 @@ mod tests {
         let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
             return Ok(());
         };
+        let _guard = postgres_test_guard();
         let deployment = format!("ugraph_noop_activity_test_{}", std::process::id());
         let store = SnapshotStore::Postgres {
             url: url.clone(),
@@ -2689,6 +2709,7 @@ mod tests {
         let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
             return Ok(());
         };
+        let _guard = postgres_test_guard();
         let chain_id = 9_000_000_000_u64 + u64::from(std::process::id());
         let deployment = format!("ugraph_feed_test_{}", std::process::id());
         let source = fixture_source();
@@ -2732,6 +2753,7 @@ mod tests {
         let Ok(url) = env::var("UGRAPH_TEST_POSTGRES_URL") else {
             return Ok(());
         };
+        let _guard = postgres_test_guard();
         let suffix = std::process::id();
         let email = format!("identity-{suffix}@ugraph.local");
         let deployment = format!("ugraph_identity_test_{suffix}");
