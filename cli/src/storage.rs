@@ -97,6 +97,41 @@ pub struct DeploymentMetadataRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeploymentVersionRecord {
+    pub deployment: String,
+    pub version_label: String,
+    pub storage_deployment: String,
+    pub visibility: String,
+    pub owner_user_id: Option<String>,
+    pub owner_email: Option<String>,
+    pub created_by_key_id: Option<String>,
+    pub created_by_key_prefix: Option<String>,
+    pub promoted_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct DeploymentVersionInput<'a> {
+    pub deployment: &'a str,
+    pub version_label: &'a str,
+    pub storage_deployment: &'a str,
+    pub visibility: &'a str,
+    pub owner_email: Option<&'a str>,
+    pub api_key: Option<&'a str>,
+    pub promote: bool,
+}
+
+struct DeploymentVersionWrite<'a> {
+    deployment: &'a str,
+    version_label: &'a str,
+    storage_deployment: &'a str,
+    visibility: &'a str,
+    owner_user_id: Option<&'a str>,
+    created_by_key_id: Option<&'a str>,
+    promote: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncBlockActivity {
     pub block_number: u64,
@@ -490,38 +525,8 @@ pub fn record_deployment_metadata(
 ) -> anyhow::Result<DeploymentMetadataRecord> {
     let mut client = connect(url)?;
     migrate(&mut client)?;
-    let explicit_owner_user_id = match owner_email {
-        Some(email) => {
-            let normalized_email = normalize_email(email)?;
-            Some(
-                client
-                    .query_opt(
-                        "select id from ugraph_users where email = $1",
-                        &[&normalized_email],
-                    )?
-                    .map(|row| row.get::<_, String>("id"))
-                    .with_context(|| format!("owner user `{normalized_email}` does not exist"))?,
-            )
-        }
-        None => None,
-    };
-    let (created_by_key_id, key_owner_user_id) = match api_key {
-        Some(key) if !key.trim().is_empty() => {
-            let key_hash = hash_api_key(key);
-            let row = client
-                .query_opt(
-                    "select id, user_id from ugraph_api_keys where key_hash = $1 and revoked_at is null",
-                    &[&key_hash],
-                )?
-                .context("api key is invalid or revoked")?;
-            (
-                Some(row.get::<_, String>("id")),
-                Some(row.get::<_, String>("user_id")),
-            )
-        }
-        _ => (None, None),
-    };
-    let owner_user_id = explicit_owner_user_id.or(key_owner_user_id);
+    let (owner_user_id, created_by_key_id) =
+        resolve_metadata_actor(&mut client, owner_email, api_key)?;
     client.execute(
         r#"
         insert into ugraph_deployment_metadata
@@ -542,8 +547,155 @@ pub fn record_deployment_metadata(
             &created_by_key_id,
         ],
     )?;
+    if let Some(version_label) = version_label {
+        let deployment_exists = client
+            .query_opt(
+                "select 1 from ugraph_deployments where id = $1",
+                &[&deployment],
+            )?
+            .is_some();
+        if deployment_exists {
+            record_deployment_version_with_client(
+                &mut client,
+                &DeploymentVersionWrite {
+                    deployment,
+                    version_label,
+                    storage_deployment: deployment,
+                    visibility,
+                    owner_user_id: owner_user_id.as_deref(),
+                    created_by_key_id: created_by_key_id.as_deref(),
+                    promote: true,
+                },
+            )?;
+        }
+    }
     load_deployment_metadata(&mut client, deployment)?
         .with_context(|| format!("deployment metadata `{deployment}` was not stored"))
+}
+
+pub fn record_deployment_version(
+    url: &str,
+    input: DeploymentVersionInput<'_>,
+) -> anyhow::Result<DeploymentVersionRecord> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let (owner_user_id, created_by_key_id) =
+        resolve_metadata_actor(&mut client, input.owner_email, input.api_key)?;
+    record_deployment_version_with_client(
+        &mut client,
+        &DeploymentVersionWrite {
+            deployment: input.deployment,
+            version_label: input.version_label,
+            storage_deployment: input.storage_deployment,
+            visibility: input.visibility,
+            owner_user_id: owner_user_id.as_deref(),
+            created_by_key_id: created_by_key_id.as_deref(),
+            promote: input.promote,
+        },
+    )?;
+    load_deployment_version(&mut client, input.deployment, input.version_label)?.with_context(
+        || {
+            format!(
+                "deployment version `{}/{}` was not stored",
+                input.deployment, input.version_label
+            )
+        },
+    )
+}
+
+pub fn promote_deployment_version(
+    url: &str,
+    deployment: &str,
+    version_label: &str,
+) -> anyhow::Result<DeploymentVersionRecord> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let version =
+        load_deployment_version(&mut client, deployment, version_label)?.with_context(|| {
+            format!("deployment version `{deployment}/{version_label}` does not exist")
+        })?;
+    client.execute(
+        r#"
+        update ugraph_deployment_versions
+        set promoted_at = now(), updated_at = now()
+        where deployment = $1 and version_label = $2
+        "#,
+        &[&deployment, &version_label],
+    )?;
+    client.execute(
+        r#"
+        insert into ugraph_deployment_metadata
+          (deployment, version_label, visibility, owner_user_id, created_by_key_id)
+        values ($1, $2, $3, $4, $5)
+        on conflict (deployment) do update
+        set version_label = excluded.version_label,
+            visibility = excluded.visibility,
+            owner_user_id = coalesce(excluded.owner_user_id, ugraph_deployment_metadata.owner_user_id),
+            created_by_key_id = coalesce(excluded.created_by_key_id, ugraph_deployment_metadata.created_by_key_id),
+            updated_at = now()
+        "#,
+        &[
+            &version.deployment,
+            &version.version_label,
+            &version.visibility,
+            &version.owner_user_id,
+            &version.created_by_key_id,
+        ],
+    )?;
+    load_deployment_version(&mut client, deployment, version_label)?.with_context(|| {
+        format!("deployment version `{deployment}/{version_label}` does not exist after promote")
+    })
+}
+
+pub fn list_deployment_versions(
+    url: &str,
+    deployment: Option<&str>,
+) -> anyhow::Result<Vec<DeploymentVersionRecord>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let rows = match deployment {
+        Some(deployment) => client.query(
+            &format!(
+                "{DEPLOYMENT_VERSION_SELECT} where v.deployment = $1 order by v.updated_at desc, v.version_label desc"
+            ),
+            &[&deployment],
+        )?,
+        None => client.query(
+            &format!(
+                "{DEPLOYMENT_VERSION_SELECT} order by v.updated_at desc, v.deployment, v.version_label desc"
+            ),
+            &[],
+        )?,
+    };
+    Ok(rows.into_iter().map(row_to_deployment_version).collect())
+}
+
+pub fn resolve_deployment_storage(
+    url: &str,
+    deployment: &str,
+    version_label: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    let requested_version = if version_label == "latest" {
+        load_deployment_metadata(&mut client, deployment)?
+            .and_then(|metadata| metadata.version_label)
+    } else {
+        Some(version_label.to_string())
+    };
+    let Some(requested_version) = requested_version else {
+        return Ok(if version_label == "latest" {
+            Some(deployment.to_string())
+        } else {
+            None
+        });
+    };
+    if let Some(version) = load_deployment_version(&mut client, deployment, &requested_version)? {
+        return Ok(Some(version.storage_deployment));
+    }
+    Ok(load_deployment_metadata(&mut client, deployment)?
+        .filter(|metadata| metadata.version_label.as_deref() == Some(requested_version.as_str()))
+        .map(|_| deployment.to_string()))
 }
 
 pub fn list_deployment_metadata(url: &str) -> anyhow::Result<Vec<DeploymentMetadataRecord>> {
@@ -556,6 +708,21 @@ pub fn list_deployment_metadata(url: &str) -> anyhow::Result<Vec<DeploymentMetad
         )?
         .into_iter()
         .map(row_to_deployment_metadata)
+        .collect())
+}
+
+pub fn list_public_deployment_versions(url: &str) -> anyhow::Result<Vec<DeploymentVersionRecord>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    Ok(client
+        .query(
+            &format!(
+                "{DEPLOYMENT_VERSION_SELECT} where v.visibility = 'public' order by v.deployment, v.version_label desc"
+            ),
+            &[],
+        )?
+        .into_iter()
+        .map(row_to_deployment_version)
         .collect())
 }
 
@@ -797,6 +964,88 @@ fn load_deployment_metadata(
         .map(row_to_deployment_metadata))
 }
 
+fn record_deployment_version_with_client(
+    client: &mut Client,
+    input: &DeploymentVersionWrite<'_>,
+) -> anyhow::Result<()> {
+    client
+        .query_opt(
+            "select id from ugraph_deployments where id = $1",
+            &[&input.storage_deployment],
+        )?
+        .with_context(|| {
+            format!(
+                "storage deployment `{}` does not exist",
+                input.storage_deployment
+            )
+        })?;
+    client.execute(
+        r#"
+        insert into ugraph_deployment_versions
+          (deployment, version_label, storage_deployment, visibility, owner_user_id,
+           created_by_key_id, promoted_at)
+        values ($1, $2, $3, $4, $5, $6, case when $7 then now() else null end)
+        on conflict (deployment, version_label) do update
+        set storage_deployment = excluded.storage_deployment,
+            visibility = excluded.visibility,
+            owner_user_id = coalesce(excluded.owner_user_id, ugraph_deployment_versions.owner_user_id),
+            created_by_key_id = coalesce(excluded.created_by_key_id, ugraph_deployment_versions.created_by_key_id),
+            promoted_at = case
+              when $7 then coalesce(ugraph_deployment_versions.promoted_at, now())
+              else ugraph_deployment_versions.promoted_at
+            end,
+            updated_at = now()
+        "#,
+        &[
+            &input.deployment,
+            &input.version_label,
+            &input.storage_deployment,
+            &input.visibility,
+            &input.owner_user_id,
+            &input.created_by_key_id,
+            &input.promote,
+        ],
+    )?;
+    if input.promote {
+        client.execute(
+            r#"
+            insert into ugraph_deployment_metadata
+              (deployment, version_label, visibility, owner_user_id, created_by_key_id)
+            values ($1, $2, $3, $4, $5)
+            on conflict (deployment) do update
+            set version_label = excluded.version_label,
+                visibility = excluded.visibility,
+                owner_user_id = coalesce(excluded.owner_user_id, ugraph_deployment_metadata.owner_user_id),
+                created_by_key_id = coalesce(excluded.created_by_key_id, ugraph_deployment_metadata.created_by_key_id),
+                updated_at = now()
+            "#,
+            &[
+                &input.deployment,
+                &input.version_label,
+                &input.visibility,
+                &input.owner_user_id,
+                &input.created_by_key_id,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn load_deployment_version(
+    client: &mut Client,
+    deployment: &str,
+    version_label: &str,
+) -> anyhow::Result<Option<DeploymentVersionRecord>> {
+    Ok(client
+        .query_opt(
+            &format!(
+                "{DEPLOYMENT_VERSION_SELECT} where v.deployment = $1 and v.version_label = $2"
+            ),
+            &[&deployment, &version_label],
+        )?
+        .map(row_to_deployment_version))
+}
+
 const DEPLOYMENT_METADATA_SELECT: &str = r#"
         select
           m.deployment,
@@ -812,6 +1061,66 @@ const DEPLOYMENT_METADATA_SELECT: &str = r#"
         left join ugraph_users owner on owner.id = m.owner_user_id
         left join ugraph_api_keys key on key.id = m.created_by_key_id
 "#;
+
+const DEPLOYMENT_VERSION_SELECT: &str = r#"
+        select
+          v.deployment,
+          v.version_label,
+          v.storage_deployment,
+          v.visibility,
+          v.owner_user_id,
+          owner.email as owner_email,
+          v.created_by_key_id,
+          key.prefix as created_by_key_prefix,
+          v.promoted_at::text,
+          v.created_at::text,
+          v.updated_at::text
+        from ugraph_deployment_versions v
+        left join ugraph_users owner on owner.id = v.owner_user_id
+        left join ugraph_api_keys key on key.id = v.created_by_key_id
+"#;
+
+fn resolve_metadata_actor(
+    client: &mut Client,
+    owner_email: Option<&str>,
+    api_key: Option<&str>,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let explicit_owner_user_id = match owner_email {
+        Some(email) => {
+            let normalized_email = normalize_email(email)?;
+            Some(
+                client
+                    .query_opt(
+                        "select id from ugraph_users where email = $1",
+                        &[&normalized_email],
+                    )?
+                    .map(|row| row.get::<_, String>("id"))
+                    .with_context(|| format!("owner user `{normalized_email}` does not exist"))?,
+            )
+        }
+        None => None,
+    };
+    let (created_by_key_id, key_owner_user_id) = match api_key {
+        Some(key) if !key.trim().is_empty() => {
+            let key_hash = hash_api_key(key);
+            let row = client
+                .query_opt(
+                    "select id, user_id from ugraph_api_keys where key_hash = $1 and revoked_at is null",
+                    &[&key_hash],
+                )?
+                .context("api key is invalid or revoked")?;
+            (
+                Some(row.get::<_, String>("id")),
+                Some(row.get::<_, String>("user_id")),
+            )
+        }
+        _ => (None, None),
+    };
+    Ok((
+        explicit_owner_user_id.or(key_owner_user_id),
+        created_by_key_id,
+    ))
+}
 
 fn normalize_email(email: &str) -> anyhow::Result<String> {
     let email = email.trim().to_ascii_lowercase();
@@ -879,6 +1188,22 @@ fn row_to_deployment_metadata(row: postgres::Row) -> DeploymentMetadataRecord {
         owner_email: row.get("owner_email"),
         created_by_key_id: row.get("created_by_key_id"),
         created_by_key_prefix: row.get("created_by_key_prefix"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_deployment_version(row: postgres::Row) -> DeploymentVersionRecord {
+    DeploymentVersionRecord {
+        deployment: row.get("deployment"),
+        version_label: row.get("version_label"),
+        storage_deployment: row.get("storage_deployment"),
+        visibility: row.get("visibility"),
+        owner_user_id: row.get("owner_user_id"),
+        owner_email: row.get("owner_email"),
+        created_by_key_id: row.get("created_by_key_id"),
+        created_by_key_prefix: row.get("created_by_key_prefix"),
+        promoted_at: row.get("promoted_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -2113,7 +2438,7 @@ values ('public_user_signup', 'false'::jsonb)
 on conflict (key) do nothing;
 
 create table if not exists ugraph_deployment_metadata (
-  deployment text primary key references ugraph_deployments(id) on delete cascade,
+  deployment text primary key,
   version_label text,
   visibility text not null default 'private',
   owner_user_id text references ugraph_users(id),
@@ -2122,6 +2447,38 @@ create table if not exists ugraph_deployment_metadata (
   updated_at timestamptz not null default now(),
   check (visibility in ('private', 'public'))
 );
+
+alter table ugraph_deployment_metadata
+  drop constraint if exists ugraph_deployment_metadata_deployment_fkey;
+
+create table if not exists ugraph_deployment_versions (
+  deployment text not null,
+  version_label text not null,
+  storage_deployment text not null references ugraph_deployments(id) on delete cascade,
+  visibility text not null default 'private',
+  owner_user_id text references ugraph_users(id),
+  created_by_key_id text references ugraph_api_keys(id),
+  promoted_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (deployment, version_label),
+  unique (deployment, storage_deployment),
+  check (visibility in ('private', 'public'))
+);
+
+create index if not exists ugraph_deployment_versions_storage
+  on ugraph_deployment_versions (storage_deployment);
+
+insert into ugraph_deployment_versions (
+  deployment, version_label, storage_deployment, visibility, owner_user_id,
+  created_by_key_id, promoted_at, created_at, updated_at
+)
+select
+  deployment, version_label, deployment, visibility, owner_user_id,
+  created_by_key_id, updated_at, created_at, updated_at
+from ugraph_deployment_metadata
+where version_label is not null
+on conflict (deployment, version_label) do nothing;
 
 alter table ugraph_deployments
   add column if not exists history jsonb not null default '[]'::jsonb;
@@ -2463,6 +2820,8 @@ mod tests {
         assert!(POSTGRES_SCHEMA.contains("removed boolean"));
         assert!(POSTGRES_SCHEMA.contains("public_user_signup"));
         assert!(POSTGRES_SCHEMA.contains("visibility in ('private', 'public')"));
+        assert!(POSTGRES_SCHEMA.contains("ugraph_deployment_versions"));
+        assert!(POSTGRES_SCHEMA.contains("storage_deployment"));
     }
 
     #[test]
@@ -2802,6 +3161,44 @@ mod tests {
         let metadata = set_deployment_visibility(&url, &deployment, "public")?;
         assert_eq!(metadata.visibility, "public");
 
+        let versioned_deployment = format!("{deployment}@v2");
+        let versioned_store = SnapshotStore::Postgres {
+            url: url.clone(),
+            deployment: versioned_deployment.clone(),
+        };
+        versioned_store.write(&fixture_snapshot())?;
+        let version = record_deployment_version(
+            &url,
+            DeploymentVersionInput {
+                deployment: &deployment,
+                version_label: "v2",
+                storage_deployment: &versioned_deployment,
+                visibility: "public",
+                owner_email: Some(&email),
+                api_key: None,
+                promote: false,
+            },
+        )?;
+        assert_eq!(version.storage_deployment, versioned_deployment);
+        assert_eq!(
+            resolve_deployment_storage(&url, &deployment, "v2")?.as_deref(),
+            Some(versioned_deployment.as_str())
+        );
+        assert_eq!(
+            resolve_deployment_storage(&url, &deployment, "latest")?.as_deref(),
+            Some(deployment.as_str())
+        );
+        promote_deployment_version(&url, &deployment, "v2")?;
+        assert_eq!(
+            resolve_deployment_storage(&url, &deployment, "latest")?.as_deref(),
+            Some(versioned_deployment.as_str())
+        );
+        assert!(list_public_deployment_versions(&url)?
+            .iter()
+            .any(|version| version.deployment == deployment
+                && version.version_label == "v2"
+                && version.storage_deployment == versioned_deployment));
+
         let deployments = list_deployment_metadata(&url)?;
         assert!(deployments
             .iter()
@@ -2811,12 +3208,21 @@ mod tests {
         assert!(verify_api_key(&url, &created.key)?.is_none());
 
         cleanup(&url, &deployment)?;
+        cleanup(&url, &versioned_deployment)?;
         cleanup_user(&url, &email)?;
         Ok(())
     }
 
     fn cleanup(url: &str, deployment: &str) -> anyhow::Result<()> {
         let mut client = connect(url)?;
+        client.execute(
+            "delete from ugraph_deployment_versions where deployment = $1 or storage_deployment = $1",
+            &[&deployment],
+        )?;
+        client.execute(
+            "delete from ugraph_deployment_metadata where deployment = $1",
+            &[&deployment],
+        )?;
         client.execute(
             "delete from ugraph_deployments where id = $1",
             &[&deployment],

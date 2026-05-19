@@ -155,6 +155,13 @@
   or update the current version label without running a sync, and can change a
   deployment's query visibility. Deployment ids are unique Postgres primary
   keys; a name can only refer to one current deployment in a given instance.
+- Production versioning separates the logical deployment name from physical
+  storage deployments. Sync new builds into a storage id such as
+  `<name>@<version>`, register them with
+  `ugraph deployments register-version --deployment <name> --version <label>
+  --storage-deployment <storage-id>`, and only move
+  `/subgraphs/<name>/latest/gn` after sync completes with
+  `ugraph deployments promote --deployment <name> --version <label>`.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
 - The live GrowFi fixture tracks the Sepolia `4.0.3` refresh from block

@@ -180,6 +180,41 @@ enum DeploymentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Register a version against a separate physical storage deployment.
+    RegisterVersion {
+        #[arg(long)]
+        deployment: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        storage_deployment: String,
+        #[arg(long, value_enum, default_value = "private")]
+        visibility: DeploymentVisibility,
+        #[arg(long)]
+        owner_email: Option<String>,
+        #[arg(long, env = "UGRAPH_API_KEY")]
+        api_key: Option<String>,
+        #[arg(long)]
+        promote: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote a registered version to the latest endpoint.
+    Promote {
+        #[arg(long)]
+        deployment: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List registered deployment versions.
+    Versions {
+        #[arg(long)]
+        deployment: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Change deployment query visibility.
     SetVisibility {
         #[arg(long)]
@@ -1574,6 +1609,89 @@ fn main() -> anyhow::Result<()> {
                         metadata.owner_email.as_deref().unwrap_or("<none>")
                     );
                     println!("updatedAt: {}", metadata.updated_at);
+                }
+            }
+            DeploymentCommand::RegisterVersion {
+                deployment,
+                version,
+                storage_deployment,
+                visibility,
+                owner_email,
+                api_key,
+                promote,
+                json,
+            } => {
+                if let Some(key) = api_key.as_deref() {
+                    storage::verify_api_key_scope(&postgres_url, key, "deploy")?
+                        .context("api key is invalid, revoked, or missing deploy scope")?;
+                }
+                let version = storage::record_deployment_version(
+                    &postgres_url,
+                    storage::DeploymentVersionInput {
+                        deployment: &deployment,
+                        version_label: &version,
+                        storage_deployment: &storage_deployment,
+                        visibility: visibility.as_str(),
+                        owner_email: owner_email.as_deref(),
+                        api_key: api_key.as_deref(),
+                        promote,
+                    },
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&version)?);
+                } else {
+                    println!("deployment: {}", version.deployment);
+                    println!("version: {}", version.version_label);
+                    println!("storageDeployment: {}", version.storage_deployment);
+                    println!("visibility: {}", version.visibility);
+                    println!(
+                        "owner: {}",
+                        version.owner_email.as_deref().unwrap_or("<none>")
+                    );
+                    println!(
+                        "promotedAt: {}",
+                        version.promoted_at.as_deref().unwrap_or("<none>")
+                    );
+                    println!("updatedAt: {}", version.updated_at);
+                }
+            }
+            DeploymentCommand::Promote {
+                deployment,
+                version,
+                json,
+            } => {
+                let version =
+                    storage::promote_deployment_version(&postgres_url, &deployment, &version)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&version)?);
+                } else {
+                    println!("deployment: {}", version.deployment);
+                    println!("version: {}", version.version_label);
+                    println!("storageDeployment: {}", version.storage_deployment);
+                    println!(
+                        "promotedAt: {}",
+                        version.promoted_at.as_deref().unwrap_or("<none>")
+                    );
+                }
+            }
+            DeploymentCommand::Versions { deployment, json } => {
+                let versions =
+                    storage::list_deployment_versions(&postgres_url, deployment.as_deref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&versions)?);
+                } else {
+                    for version in versions {
+                        println!(
+                            "{} version={} storage={} visibility={} owner={} promotedAt={} updatedAt={}",
+                            version.deployment,
+                            version.version_label,
+                            version.storage_deployment,
+                            version.visibility,
+                            version.owner_email.as_deref().unwrap_or("<none>"),
+                            version.promoted_at.as_deref().unwrap_or("<none>"),
+                            version.updated_at
+                        );
+                    }
                 }
             }
             DeploymentCommand::SetVisibility {

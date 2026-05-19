@@ -162,7 +162,8 @@ fn handle_store_connection(
         return write_response(&mut stream, "204 No Content", "text/plain", b"");
     }
     if method == "GET" && (path == "/" || path == "/status") {
-        let (status, store_status) = match store.status() {
+        let status_store = latest_store_for_status(store).unwrap_or_else(|_| store.clone());
+        let (status, store_status) = match status_store.status() {
             Ok(store_status) => ("200 OK", Some(store_status)),
             Err(_) => ("503 Service Unavailable", None),
         };
@@ -170,33 +171,36 @@ fn handle_store_connection(
         let query_params = query_string.map(parse_query_params).unwrap_or_default();
         let sync_options = SyncActivityOptions::from_params(&query_params);
         let public_deployments = public_deployments_for_store(store).unwrap_or_default();
-        let sync_activity = sync_activity_for_store(store, &sync_options).ok();
+        let sync_activity = sync_activity_for_store(&status_store, &sync_options).ok();
         return write_response(
             &mut stream,
             status,
             "text/html; charset=utf-8",
-            home_html(
+            home_html(HomeHtmlInput {
                 store,
-                store_status.as_ref(),
-                metadata.as_ref(),
-                &public_deployments,
-                sync_activity.as_ref(),
-                &sync_options,
+                runtime_store: &status_store,
+                status: store_status.as_ref(),
+                metadata: metadata.as_ref(),
+                public_deployments: &public_deployments,
+                sync_activity: sync_activity.as_ref(),
+                sync_options: &sync_options,
                 options,
-            )
+            })
             .as_bytes(),
         );
     }
     if method == "GET" && path == "/healthz" {
-        return write_healthz(&mut stream, store);
+        let status_store = latest_store_for_status(store).unwrap_or_else(|_| store.clone());
+        return write_healthz(&mut stream, &status_store);
     }
     if method == "GET" && path == "/metrics" {
-        return write_metrics(&mut stream, store);
+        let status_store = latest_store_for_status(store).unwrap_or_else(|_| store.clone());
+        return write_metrics(&mut stream, &status_store);
     }
     if let Some(endpoint) = graphql_endpoint(path) {
-        match graphql_endpoint_allowed(store, endpoint) {
-            Ok(true) => {}
-            Ok(false) => {
+        let (query_store, meta_deployment) = match resolve_graphql_store(store, endpoint) {
+            Ok(Some(resolved)) => resolved,
+            Ok(None) => {
                 return write_response(
                     &mut stream,
                     "404 Not Found",
@@ -211,10 +215,19 @@ fn handle_store_connection(
                     &json!({ "errors": [{ "message": error.to_string() }] }),
                 );
             }
-        }
+        };
         return match method {
-            "GET" => handle_graphql_get(&mut stream, store, &headers, endpoint, query_string),
-            "POST" => handle_graphql_post(&mut stream, store, &headers, body),
+            "GET" => handle_graphql_get(
+                &mut stream,
+                &query_store,
+                &meta_deployment,
+                &headers,
+                endpoint,
+                query_string,
+            ),
+            "POST" => {
+                handle_graphql_post(&mut stream, &query_store, &meta_deployment, &headers, body)
+            }
             _ => write_response(
                 &mut stream,
                 "405 Method Not Allowed",
@@ -231,26 +244,42 @@ fn handle_store_connection(
     )
 }
 
-fn graphql_endpoint_allowed(
+fn resolve_graphql_store(
     store: &SnapshotStore,
     endpoint: GraphqlEndpoint<'_>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<(SnapshotStore, String)>> {
     let Some(requested_deployment) = endpoint.deployment else {
-        return Ok(true);
+        return Ok(Some((store.clone(), deployment_name(store).to_string())));
     };
     if requested_deployment != deployment_name(store) {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(requested_version) = endpoint.version else {
-        return Ok(true);
+        return Ok(Some((store.clone(), requested_deployment.to_string())));
     };
-    if requested_version == "latest" {
-        return Ok(true);
+    match store {
+        SnapshotStore::Postgres { url, .. } => {
+            Ok(
+                storage::resolve_deployment_storage(url, requested_deployment, requested_version)?
+                    .map(|storage_deployment| {
+                        (
+                            SnapshotStore::Postgres {
+                                url: url.clone(),
+                                deployment: storage_deployment,
+                            },
+                            requested_deployment.to_string(),
+                        )
+                    }),
+            )
+        }
+        SnapshotStore::Json { .. } => {
+            if requested_version == "latest" {
+                Ok(Some((store.clone(), requested_deployment.to_string())))
+            } else {
+                Ok(None)
+            }
+        }
     }
-    Ok(deployment_metadata_for_store(store)?
-        .and_then(|metadata| metadata.version_label)
-        .as_deref()
-        == Some(requested_version))
 }
 
 fn graphql_endpoint(path: &str) -> Option<GraphqlEndpoint<'_>> {
@@ -279,6 +308,7 @@ fn graphql_endpoint(path: &str) -> Option<GraphqlEndpoint<'_>> {
 fn handle_graphql_get(
     stream: &mut TcpStream,
     store: &SnapshotStore,
+    meta_deployment: &str,
     headers: &BTreeMap<String, String>,
     endpoint: GraphqlEndpoint<'_>,
     query_string: Option<&str>,
@@ -301,7 +331,7 @@ fn handle_graphql_get(
                         query,
                         &variables,
                         operation_name,
-                        Some(deployment_name(store)),
+                        Some(meta_deployment),
                     );
                     write_json(stream, &response)
                 }
@@ -324,6 +354,7 @@ fn handle_graphql_get(
 fn handle_graphql_post(
     stream: &mut TcpStream,
     store: &SnapshotStore,
+    meta_deployment: &str,
     headers: &BTreeMap<String, String>,
     body: &[u8],
 ) -> anyhow::Result<()> {
@@ -348,7 +379,7 @@ fn handle_graphql_post(
                 &payload.query,
                 &payload.variables,
                 payload._operation_name.as_deref(),
-                Some(deployment_name(store)),
+                Some(meta_deployment),
             );
             write_json(stream, &response)
         }
@@ -578,14 +609,25 @@ fn deployment_metadata_for_store(
     }
 }
 
+fn latest_store_for_status(store: &SnapshotStore) -> anyhow::Result<SnapshotStore> {
+    match store {
+        SnapshotStore::Postgres { url, deployment } => Ok(storage::resolve_deployment_storage(
+            url, deployment, "latest",
+        )?
+        .map(|storage_deployment| SnapshotStore::Postgres {
+            url: url.clone(),
+            deployment: storage_deployment,
+        })
+        .unwrap_or_else(|| store.clone())),
+        SnapshotStore::Json { .. } => Ok(store.clone()),
+    }
+}
+
 fn public_deployments_for_store(
     store: &SnapshotStore,
-) -> anyhow::Result<Vec<storage::DeploymentMetadataRecord>> {
+) -> anyhow::Result<Vec<storage::DeploymentVersionRecord>> {
     match store {
-        SnapshotStore::Postgres { url, .. } => Ok(storage::list_deployment_metadata(url)?
-            .into_iter()
-            .filter(|metadata| metadata.visibility == "public")
-            .collect()),
+        SnapshotStore::Postgres { url, .. } => storage::list_public_deployment_versions(url),
         SnapshotStore::Json { .. } => Ok(Vec::new()),
     }
 }
@@ -679,15 +721,26 @@ fn prometheus_label_value(value: &str) -> String {
         .replace('\n', r"\n")
 }
 
-fn home_html(
-    store: &SnapshotStore,
-    status: Option<&StoreStatus>,
-    metadata: Option<&storage::DeploymentMetadataRecord>,
-    public_deployments: &[storage::DeploymentMetadataRecord],
-    sync_activity: Option<&storage::SyncActivityPage>,
-    sync_options: &SyncActivityOptions,
-    options: &ServeOptions,
-) -> String {
+struct HomeHtmlInput<'a> {
+    store: &'a SnapshotStore,
+    runtime_store: &'a SnapshotStore,
+    status: Option<&'a StoreStatus>,
+    metadata: Option<&'a storage::DeploymentMetadataRecord>,
+    public_deployments: &'a [storage::DeploymentVersionRecord],
+    sync_activity: Option<&'a storage::SyncActivityPage>,
+    sync_options: &'a SyncActivityOptions,
+    options: &'a ServeOptions,
+}
+
+fn home_html(input: HomeHtmlInput<'_>) -> String {
+    let store = input.store;
+    let runtime_store = input.runtime_store;
+    let status = input.status;
+    let metadata = input.metadata;
+    let public_deployments = input.public_deployments;
+    let sync_activity = input.sync_activity;
+    let sync_options = input.sync_options;
+    let options = input.options;
     let ok = status
         .map(|status| status.checkpoint.complete && status.checkpoint.validation_errors == 0)
         .unwrap_or(false);
@@ -914,7 +967,7 @@ fn home_html(
   </script>
 </body>
 </html>"#,
-        store = html_escape(&store.label()),
+        store = html_escape(&runtime_store.label()),
         badge = badge,
         status = display_status,
         deployment = html_escape(deployment),
@@ -947,19 +1000,21 @@ fn home_html(
     )
 }
 
-fn public_subgraphs_html(rows: &[storage::DeploymentMetadataRecord]) -> String {
+fn public_subgraphs_html(rows: &[storage::DeploymentVersionRecord]) -> String {
     if rows.is_empty() {
         return r#"<div class="empty-row">no public subgraphs</div>"#.to_string();
     }
     rows.iter()
-        .map(|metadata| {
-            let version = metadata.version_label.as_deref().unwrap_or("latest");
-            let endpoint = format!("/subgraphs/{}/{version}/gn", metadata.deployment);
-            let deployed_by = metadata
+        .map(|version| {
+            let endpoint = format!(
+                "/subgraphs/{}/{}/gn",
+                version.deployment, version.version_label
+            );
+            let deployed_by = version
                 .owner_email
                 .clone()
                 .or_else(|| {
-                    metadata
+                    version
                         .created_by_key_prefix
                         .as_ref()
                         .map(|prefix| format!("key:{prefix}"))
@@ -974,8 +1029,8 @@ fn public_subgraphs_html(rows: &[storage::DeploymentMetadataRecord]) -> String {
                     r#"<div class="subgraph-cell"><span class="subgraph-label">endpoint</span><a href="{endpoint}">{endpoint}</a></div>"#,
                     r#"</article>"#
                 ),
-                name = html_escape(&metadata.deployment),
-                version = html_escape(version),
+                name = html_escape(&version.deployment),
+                version = html_escape(&version.version_label),
                 deployed_by = html_escape(&deployed_by),
                 endpoint = html_escape(&endpoint)
             )
@@ -1847,6 +1902,19 @@ mod tests {
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
+        let version = storage::DeploymentVersionRecord {
+            deployment: "growfi".to_string(),
+            version_label: "4.0.2".to_string(),
+            storage_deployment: "growfi@4.0.2".to_string(),
+            visibility: "public".to_string(),
+            owner_user_id: None,
+            owner_email: Some("ops@ugraph.local".to_string()),
+            created_by_key_id: None,
+            created_by_key_prefix: None,
+            promoted_at: Some("now".to_string()),
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
         let sync_activity = storage::SyncActivityPage {
             activities: vec![storage::SyncBlockActivity {
                 block_number: 42,
@@ -1893,15 +1961,16 @@ mod tests {
             block_explorer_url: None,
         };
 
-        let html = home_html(
-            &store,
-            Some(&status),
-            Some(&metadata),
-            std::slice::from_ref(&metadata),
-            Some(&sync_activity),
-            &sync_options,
-            &serve_options,
-        );
+        let html = home_html(HomeHtmlInput {
+            store: &store,
+            runtime_store: &store,
+            status: Some(&status),
+            metadata: Some(&metadata),
+            public_deployments: std::slice::from_ref(&version),
+            sync_activity: Some(&sync_activity),
+            sync_options: &sync_options,
+            options: &serve_options,
+        });
 
         assert!(html.contains("OPERATIONAL"));
         assert!(html.contains("/subgraphs/growfi/4.0.2/gn"));

@@ -37,6 +37,15 @@
   an existing deployment without running a sync. Deployment ids are unique in
   Postgres, so a name can only refer to one current deployment in a given
   instance.
+- Production versioning uses a logical deployment name plus physical storage
+  deployments. Register a new build with
+  `ugraph deployments register-version --deployment <name> --version <label>
+  --storage-deployment <physical-id>` while it syncs; `/subgraphs/<name>/latest/gn`
+  keeps serving the previously promoted version until
+  `ugraph deployments promote --deployment <name> --version <label>` flips the
+  latest pointer. Explicit version URLs resolve through
+  `ugraph_deployment_versions`, so old versions stay queryable until an
+  operator deletes their physical storage deployment.
 - Implemented feed schema tables: `ugraph_feed_subscriptions`,
   `ugraph_raw_blocks`, and `ugraph_raw_logs`.
 - Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also
