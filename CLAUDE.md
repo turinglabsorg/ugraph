@@ -7,6 +7,9 @@
   `cli/` owns the user/operator `ugraph` binary. The core Docker image must not
   copy `cli/`. Run Cargo commands from the repository root and reference
   GrowFi fixtures as `core/examples/growfi/...`.
+- `core/crates/ugraph-service` owns shared query/server/state/storage modules
+  consumed by both `ugraph-node` and the operator CLI. Do not move those modules
+  back under `cli/`.
 - Production uses a shared multi-chain feed, not one RPC scanner per subgraph.
 - Run one `chain-reader` per `chain_id`. Each reader owns RPC polling for that
   chain and writes raw blocks/logs to Postgres.
@@ -56,6 +59,9 @@
   `ugraph-node`. The core entrypoint only forwards node runtime commands
   (`serve`, `sync`, `chain-reader`, `--help`); user/admin CLI commands stay in
   the separate `ugraph` binary under `cli/`.
+- `core/Dockerfile` intentionally copies only `Cargo.toml`, `Cargo.lock`, and
+  `core/crates`, then removes the `cli` workspace member before building
+  `ugraph-node`; keep that build path core-only.
 - The public homepage is served from `/` and `/status` as a brutalist
   terminal-style status page with a single `made by turinglabs_` credit linked
   to `https://turinglabs.org`. It lists public deployment metadata and the
