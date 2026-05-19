@@ -756,20 +756,11 @@ pub fn recent_sync_activity(
     } else {
         client.query(
             r#"
-            select
-              changed.block_number,
-              coalesce(c.block_hash, changed.block_hash) as block_hash,
-              coalesce(c.block_timestamp, changed.block_timestamp) as block_timestamp
-            from (
-              select block_number, min(block_hash) as block_hash, min(block_timestamp) as block_timestamp
-              from ugraph_entity_changes
-              where deployment = $1
-              group by block_number
-            ) changed
-            left join ugraph_sync_checkpoints c
-              on c.deployment = $1
-             and c.block_number = changed.block_number
-            order by changed.block_number desc
+            select block_number, block_hash, block_timestamp
+            from ugraph_sync_checkpoints
+            where deployment = $1
+              and entity_changes > 0
+            order by block_number desc
             limit $2 offset $3
             "#,
             &[&deployment, &query_limit, &query_offset],
@@ -2612,121 +2603,148 @@ create index if not exists ugraph_entity_changes_block
 create index if not exists ugraph_entity_changes_entity_id
   on ugraph_entity_changes (deployment, entity, id, block_number);
 
+create index if not exists ugraph_entity_changes_action
+  on ugraph_entity_changes (deployment, action);
+
 create index if not exists ugraph_entity_changes_data_gin
   on ugraph_entity_changes using gin (data);
 
-insert into ugraph_sync_checkpoints (
-  deployment, block_number, block_hash, block_timestamp, from_block,
-  scanned_logs, executed_logs, validation_errors, complete, entity_changes, synced_at
-)
-select
-  h.deployment,
-  h.block_number,
-  h.block_hash,
-  nullif(h.checkpoint->>'block_timestamp', '')::bigint,
-  nullif(h.checkpoint->>'from_block', '')::bigint,
-  coalesce(nullif(h.checkpoint->>'scanned_logs', '')::bigint, 0),
-  coalesce(nullif(h.checkpoint->>'executed_logs', '')::bigint, 0),
-  coalesce(nullif(h.checkpoint->>'validation_errors', '')::bigint, 0),
-  coalesce(nullif(h.checkpoint->>'complete', '')::boolean, false),
-  coalesce(v.entity_changes, 0),
-  h.updated_at
-from ugraph_history_snapshots h
-left join (
-  select deployment, block_number, count(*)::integer as entity_changes
-  from ugraph_entity_versions
-  group by deployment, block_number
-) v on v.deployment = h.deployment and v.block_number = h.block_number
-on conflict (deployment, block_number) do nothing;
-
-delete from ugraph_sync_checkpoints
-where from_block is not null
-  and from_block > block_number;
-
-insert into ugraph_entity_changes (
-  deployment, block_number, block_hash, block_timestamp,
-  entity, id, action, data, previous_data, updated_at
-)
-select
-  v.deployment,
-  v.block_number,
-  h.block_hash,
-  nullif(h.checkpoint->>'block_timestamp', '')::bigint,
-  v.entity,
-  v.id,
-  case
-    when v.removed then 'removed'
-    when prev.block_number is null or prev.removed then 'created'
-    else 'updated'
-  end,
-  v.data,
-  case when prev.removed then null else prev.data end,
-  h.updated_at
-from ugraph_entity_versions v
-join ugraph_history_snapshots h
-  on h.deployment = v.deployment
- and h.block_number = v.block_number
-left join lateral (
-  select p.block_number, p.removed, p.data
-  from ugraph_entity_versions p
-  where p.deployment = v.deployment
-    and p.entity = v.entity
-    and p.id = v.id
-    and p.block_number < v.block_number
-  order by p.block_number desc
-  limit 1
-) prev on true
-where
-  (v.removed and prev.block_number is not null and not prev.removed)
-  or (
-    not v.removed
-    and (
-      prev.block_number is null
-      or prev.removed
-      or prev.data is distinct from v.data
+do $ugraph_migration$
+begin
+  if not exists (
+    select 1
+    from ugraph_settings
+    where key = 'migration.entity_changes_backfill.v1'
+      and value = 'true'::jsonb
+  ) then
+    insert into ugraph_sync_checkpoints (
+      deployment, block_number, block_hash, block_timestamp, from_block,
+      scanned_logs, executed_logs, validation_errors, complete, entity_changes, synced_at
     )
-  )
-on conflict (deployment, block_number, entity, id) do nothing;
+    select
+      h.deployment,
+      h.block_number,
+      h.block_hash,
+      nullif(h.checkpoint->>'block_timestamp', '')::bigint,
+      nullif(h.checkpoint->>'from_block', '')::bigint,
+      coalesce(nullif(h.checkpoint->>'scanned_logs', '')::bigint, 0),
+      coalesce(nullif(h.checkpoint->>'executed_logs', '')::bigint, 0),
+      coalesce(nullif(h.checkpoint->>'validation_errors', '')::bigint, 0),
+      coalesce(nullif(h.checkpoint->>'complete', '')::boolean, false),
+      coalesce(v.entity_changes, 0),
+      h.updated_at
+    from ugraph_history_snapshots h
+    left join (
+      select deployment, block_number, count(*)::integer as entity_changes
+      from ugraph_entity_versions
+      group by deployment, block_number
+    ) v on v.deployment = h.deployment and v.block_number = h.block_number
+    on conflict (deployment, block_number) do nothing;
 
-update ugraph_entity_changes current_change
-set
-  previous_data = case
-    when previous_change.action = 'removed' then null
-    else previous_change.data
-  end,
-  action = case
-    when current_change.action = 'created'
-     and previous_change.action <> 'removed'
-      then 'updated'
-    else current_change.action
-  end
-from ugraph_entity_changes previous_change
-where previous_change.deployment = current_change.deployment
-  and previous_change.entity = current_change.entity
-  and previous_change.id = current_change.id
-  and previous_change.block_number = (
-    select max(previous_block.block_number)
-    from ugraph_entity_changes previous_block
-    where previous_block.deployment = current_change.deployment
-      and previous_block.entity = current_change.entity
-      and previous_block.id = current_change.id
-      and previous_block.block_number < current_change.block_number
-  )
-  and current_change.previous_data is null
-  and previous_change.data is not null;
+    delete from ugraph_sync_checkpoints
+    where from_block is not null
+      and from_block > block_number;
 
-delete from ugraph_entity_changes
-where action = 'updated'
-  and previous_data is not null
-  and data = previous_data;
+    insert into ugraph_entity_changes (
+      deployment, block_number, block_hash, block_timestamp,
+      entity, id, action, data, previous_data, updated_at
+    )
+    select
+      v.deployment,
+      v.block_number,
+      h.block_hash,
+      nullif(h.checkpoint->>'block_timestamp', '')::bigint,
+      v.entity,
+      v.id,
+      case
+        when v.removed then 'removed'
+        when prev.block_number is null or prev.removed then 'created'
+        else 'updated'
+      end,
+      v.data,
+      case when prev.removed then null else prev.data end,
+      h.updated_at
+    from ugraph_entity_versions v
+    join ugraph_history_snapshots h
+      on h.deployment = v.deployment
+     and h.block_number = v.block_number
+    left join lateral (
+      select p.block_number, p.removed, p.data
+      from ugraph_entity_versions p
+      where p.deployment = v.deployment
+        and p.entity = v.entity
+        and p.id = v.id
+        and p.block_number < v.block_number
+      order by p.block_number desc
+      limit 1
+    ) prev on true
+    where
+      (v.removed and prev.block_number is not null and not prev.removed)
+      or (
+        not v.removed
+        and (
+          prev.block_number is null
+          or prev.removed
+          or prev.data is distinct from v.data
+        )
+      )
+    on conflict (deployment, block_number, entity, id) do nothing;
 
-update ugraph_sync_checkpoints checkpoint
-set entity_changes = (
-  select count(*)::integer
-  from ugraph_entity_changes change
-  where change.deployment = checkpoint.deployment
-    and change.block_number = checkpoint.block_number
-);
+    update ugraph_entity_changes current_change
+    set
+      previous_data = case
+        when previous_change.action = 'removed' then null
+        else previous_change.data
+      end,
+      action = case
+        when current_change.action = 'created'
+         and previous_change.action <> 'removed'
+          then 'updated'
+        else current_change.action
+      end
+    from ugraph_entity_changes previous_change
+    where previous_change.deployment = current_change.deployment
+      and previous_change.entity = current_change.entity
+      and previous_change.id = current_change.id
+      and previous_change.block_number = (
+        select max(previous_block.block_number)
+        from ugraph_entity_changes previous_block
+        where previous_block.deployment = current_change.deployment
+          and previous_block.entity = current_change.entity
+          and previous_block.id = current_change.id
+          and previous_block.block_number < current_change.block_number
+      )
+      and current_change.previous_data is null
+      and previous_change.data is not null;
+
+    delete from ugraph_entity_changes
+    where action = 'updated'
+      and previous_data is not null
+      and data = previous_data;
+
+    update ugraph_sync_checkpoints checkpoint
+    set entity_changes = counts.entity_changes
+    from (
+      select
+        checkpoint.deployment,
+        checkpoint.block_number,
+        count(change.*)::integer as entity_changes
+      from ugraph_sync_checkpoints checkpoint
+      left join ugraph_entity_changes change
+        on change.deployment = checkpoint.deployment
+       and change.block_number = checkpoint.block_number
+      group by checkpoint.deployment, checkpoint.block_number
+    ) counts
+    where counts.deployment = checkpoint.deployment
+      and counts.block_number = checkpoint.block_number
+      and checkpoint.entity_changes is distinct from counts.entity_changes;
+
+    insert into ugraph_settings (key, value)
+    values ('migration.entity_changes_backfill.v1', 'true'::jsonb)
+    on conflict (key) do update set value = excluded.value;
+  end if;
+end
+$ugraph_migration$;
 
 create table if not exists ugraph_feed_subscriptions (
   chain_id bigint not null,
@@ -2822,6 +2840,8 @@ mod tests {
         assert!(POSTGRES_SCHEMA.contains("visibility in ('private', 'public')"));
         assert!(POSTGRES_SCHEMA.contains("ugraph_deployment_versions"));
         assert!(POSTGRES_SCHEMA.contains("storage_deployment"));
+        assert!(POSTGRES_SCHEMA.contains("migration.entity_changes_backfill.v1"));
+        assert!(POSTGRES_SCHEMA.contains("ugraph_entity_changes_action"));
     }
 
     #[test]
@@ -3042,6 +3062,10 @@ mod tests {
                 ],
             )?;
         }
+        client.execute(
+            "delete from ugraph_settings where key = 'migration.entity_changes_backfill.v1'",
+            &[],
+        )?;
         drop(client);
 
         let page = recent_sync_activity(&url, &deployment, 1, 10, 10, false)?;

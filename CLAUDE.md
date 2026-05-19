@@ -46,6 +46,9 @@
   latest pointer. Explicit version URLs resolve through
   `ugraph_deployment_versions`, so old versions stay queryable until an
   operator deletes their physical storage deployment.
+- Legacy entity-change backfill is guarded by the
+  `migration.entity_changes_backfill.v1` setting; do not reintroduce unguarded
+  data backfills into the hot-path `migrate` routine.
 - Implemented feed schema tables: `ugraph_feed_subscriptions`,
   `ugraph_raw_blocks`, and `ugraph_raw_logs`.
 - Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also

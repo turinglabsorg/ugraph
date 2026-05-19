@@ -162,6 +162,9 @@
   --storage-deployment <storage-id>`, and only move
   `/subgraphs/<name>/latest/gn` after sync completes with
   `ugraph deployments promote --deployment <name> --version <label>`.
+- Legacy entity-change backfill is guarded by
+  `migration.entity_changes_backfill.v1`; schema migration code must not run
+  heavy data backfills on every API/status request.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
 - The live GrowFi fixture tracks the Sepolia `4.0.3` refresh from block
