@@ -694,6 +694,7 @@ impl<'a> AscAllocator<'a> {
         let zero_hash = self.alloc_uint8_array(&[0; 32])?;
         let zero_address = self.alloc_uint8_array(&[0; 20])?;
         let number = self.alloc_bigint_u64(log.block_number.unwrap_or_default())?;
+        let timestamp = self.alloc_bigint_u64(log.block_timestamp.unwrap_or_default())?;
         let zero = self.alloc_bigint_u64(0)?;
 
         let mut bytes = Vec::with_capacity(60);
@@ -707,7 +708,7 @@ impl<'a> AscAllocator<'a> {
         push_i32(&mut bytes, number);
         push_i32(&mut bytes, zero);
         push_i32(&mut bytes, zero);
-        push_i32(&mut bytes, zero);
+        push_i32(&mut bytes, timestamp);
         push_i32(&mut bytes, zero);
         push_i32(&mut bytes, zero);
         push_i32(&mut bytes, 0);

@@ -15,6 +15,9 @@
   isolated entity stores under their own `UGRAPH_DEPLOYMENT` ids.
 - A deployment can subscribe to multiple `chain_id` values when a subgraph spans
   multiple chains.
+- The live GrowFi fixture tracks the Sepolia `4.0.3` refresh from block
+  `10838711`; reset the `growfi` deployment before switching away from older
+  fixture versions so stale checkpoints do not resume past the new start block.
 - The intended operator flow is `ugraph deploy ...`: create or reuse shared
   infrastructure, ensure required chain readers exist, register subscriptions,
   run sync, and expose GraphQL/GraphiQL.

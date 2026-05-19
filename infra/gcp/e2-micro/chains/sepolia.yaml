@@ -5,7 +5,7 @@ chain_id: 11155111
 block_explorer_url: https://sepolia.etherscan.io/block/{block}
 rpc_url: https://sepolia.drpc.org
 subgraph_manifest: /app/examples/growfi/subgraph.yaml
-from_block: 10845295
+from_block: 10838711
 to_block:
 log_source: rpc
 poll_interval_ms: 12000

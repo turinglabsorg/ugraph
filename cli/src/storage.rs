@@ -2044,6 +2044,7 @@ pub fn load_feed_source_report(
             address: row.get("address"),
             block_number: Some(u64::try_from(block_number).context("raw log block is negative")?),
             block_hash: row.get("block_hash"),
+            block_timestamp: None,
             transaction_hash: row.get("transaction_hash"),
             transaction_index: Some(
                 u64::try_from(transaction_index).context("raw log tx index is negative")?,

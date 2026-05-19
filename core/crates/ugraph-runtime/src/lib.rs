@@ -826,7 +826,7 @@ mod tests {
             "../../examples/growfi/build",
         )?;
         assert!(report.ok, "invalid handlers: {:?}", report.invalid_handlers);
-        assert_eq!(report.handlers.len(), 60);
+        assert_eq!(report.handlers.len(), 76);
         Ok(())
     }
 
@@ -1040,6 +1040,7 @@ mod tests {
             block_hash: Some(
                 "0x814cdf8c4c15539ab369ab1e591c07d6974b52f39b2cf999a6523db19b3db511".to_string(),
             ),
+            block_timestamp: None,
             transaction_hash: Some(
                 "0x55b0316329243a6053ffc86126d07c48cda3c667f2ea433578cd895d33145b3c".to_string(),
             ),
@@ -1076,6 +1077,7 @@ mod tests {
             block_hash: Some(
                 "0x814cdf8c4c15539ab369ab1e591c07d6974b52f39b2cf999a6523db19b3db511".to_string(),
             ),
+            block_timestamp: None,
             transaction_hash: Some(
                 "0x65b0316329243a6053ffc86126d07c48cda3c667f2ea433578cd895d33145b3c".to_string(),
             ),

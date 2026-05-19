@@ -2025,7 +2025,19 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         {
             break;
         }
-        let wasm_path = wasm_path_for_log(&input.build_dir, &log);
+        let mut runtime_log = log.clone();
+        if let Some(block_number) = runtime_log.block_number {
+            let block_metadata =
+                cached_block_metadata(&mut block_metadata_cache, &scan.rpc_url, block_number)
+                    .unwrap_or_default();
+            if runtime_log.block_hash.is_none() {
+                runtime_log.block_hash = block_metadata.hash;
+            }
+            if runtime_log.block_timestamp.is_none() {
+                runtime_log.block_timestamp = block_metadata.timestamp;
+            }
+        }
+        let wasm_path = wasm_path_for_log(&input.build_dir, &runtime_log);
         let mut candidate_store = entity_store.clone();
         let mut candidate_call_cache = ethereum_call_cache.clone();
         let data_source_context =
@@ -2033,7 +2045,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         let mut execution =
             ugraph_runtime::execute_matched_log_handler_with_runtime_cache_and_data_source_context(
                 wasm_path,
-                &log,
+                &runtime_log,
                 &mut candidate_store,
                 Some(&scan.rpc_url),
                 &mut candidate_call_cache,
@@ -3449,6 +3461,7 @@ mod tests {
             address: "0x0000000000000000000000000000000000000001".to_string(),
             block_number: Some(block_number),
             block_hash: Some(format!("0x{block_number:064x}")),
+            block_timestamp: None,
             transaction_hash: Some(format!("0x{log_index:064x}")),
             transaction_index: Some(0),
             log_index: Some(log_index),

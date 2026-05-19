@@ -157,6 +157,9 @@
   keys; a name can only refer to one current deployment in a given instance.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
+- The live GrowFi fixture tracks the Sepolia `4.0.3` refresh from block
+  `10838711`; reset the `growfi` deployment before switching away from older
+  fixture versions so stale checkpoints do not resume past the new start block.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`
   matched through `ugraph compare` for `_meta(block:)`, `campaigns(block:,
   where: id_in, orderBy:)`, `acceptedTokens`, `purchases`, and

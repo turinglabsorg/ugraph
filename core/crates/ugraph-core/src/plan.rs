@@ -169,11 +169,11 @@ mod tests {
                 .iter()
                 .map(|source| source.triggers.len())
                 .sum::<usize>(),
-            60
+            76
         );
         assert!(plan.sources.iter().any(|source| {
             source.name == "CampaignFactory"
-                && source.address.as_deref() == Some("0xB804de4d151E5A8a9EBa61a9904EC3588c8EFb56")
+                && source.address.as_deref() == Some("0xa4DEd8Ab35e89bCAF1f7DFeb7aB2c1ED533b3f05")
         }));
         Ok(())
     }
@@ -198,7 +198,7 @@ mod tests {
             Some("0x0000000000000000000000000000000000001001")
         );
         assert_eq!(source.start_block, Some(10845481));
-        assert_eq!(source.triggers.len(), 17);
+        assert_eq!(source.triggers.len(), 33);
         Ok(())
     }
 }

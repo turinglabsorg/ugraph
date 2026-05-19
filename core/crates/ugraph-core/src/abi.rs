@@ -352,7 +352,7 @@ mod tests {
     fn growfi_manifest_events_exist_in_declared_abis() -> Result<(), AbiError> {
         let report = check_manifest_abi_events("../../examples/growfi/subgraph.yaml")?;
         assert!(report.ok, "missing ABI events: {:?}", report.missing_events);
-        assert_eq!(report.events.len(), 60);
+        assert_eq!(report.events.len(), 76);
         Ok(())
     }
 }
