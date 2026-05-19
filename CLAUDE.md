@@ -74,6 +74,9 @@
   history is loaded only when the query contains a `block:` argument.
 - RPC, Chainlist registry, and mapping `ethereum.call` requests are bounded by
   `UGRAPH_RPC_TIMEOUT_SECS`.
+- Runtime execution enriches logs with RPC block metadata before calling WASM
+  handlers, so Graph mappings receive real `event.block.timestamp` values
+  instead of zero-filled block objects.
 - When no explicit RPC is configured, `chain-reader` tries all resolved
   Chainlist URLs in order rather than pinning itself to the first URL.
 - Shared feed reorg handling is implemented: `chain-reader` compares stored
