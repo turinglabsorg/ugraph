@@ -20,11 +20,12 @@ log_source="${UGRAPH_LOG_SOURCE:-rpc}"
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    -h|--help|validate|inspect|rpc|wasm-imports|wasm-exports|handler-exports|abi-events|plan|scan|replay|sync|chain-reader|deploy|users|deployments|serve|compare|conformance|schema|handler-signatures|compat|runtime-check|type-ids|doctor|matrix)
-      exec /usr/local/bin/ugraph "$@"
+    -h|--help|sync|chain-reader|serve)
+      exec /usr/local/bin/ugraph-node "$@"
       ;;
     *)
-      exec "$@"
+      echo "unknown ugraph-node command: $1" >&2
+      exit 64
       ;;
   esac
 fi
@@ -35,7 +36,7 @@ case "$mode" in
       echo "UGRAPH_POSTGRES_URL is required for UGRAPH_MODE=chain-reader" >&2
       exit 1
     fi
-    set -- /usr/local/bin/ugraph chain-reader --manifest "$manifest" \
+    set -- /usr/local/bin/ugraph-node chain-reader --manifest "$manifest" \
       --postgres-url "$UGRAPH_POSTGRES_URL" \
       --deployment "$deployment" --watch \
       --poll-interval-ms "$poll_interval_ms" --retry-max-ms "$retry_max_ms" \
@@ -55,7 +56,7 @@ case "$mode" in
     exec "$@"
     ;;
   serve|api)
-    set -- /usr/local/bin/ugraph serve --host "$host" --port "$port"
+    set -- /usr/local/bin/ugraph-node serve --host "$host" --port "$port"
     if [ "$storage" = "postgres" ]; then
       if [ -z "${UGRAPH_POSTGRES_URL:-}" ]; then
         echo "UGRAPH_POSTGRES_URL is required when UGRAPH_STORAGE=postgres" >&2
@@ -74,7 +75,7 @@ case "$mode" in
     exec "$@"
     ;;
   sync|indexer|worker)
-    set -- /usr/local/bin/ugraph sync --manifest "$manifest" --limit "$limit" --watch \
+    set -- /usr/local/bin/ugraph-node sync --manifest "$manifest" --limit "$limit" --watch \
       --poll-interval-ms "$poll_interval_ms" --retry-max-ms "$retry_max_ms" \
       --reorg-policy "$reorg_policy" --reorg-check-depth "$reorg_check_depth" \
       --history-limit "$history_limit" \

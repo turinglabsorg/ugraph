@@ -1,24 +1,18 @@
 [package]
-name = "ugraph"
+name = "ugraph-service"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "ugraph"
-path = "src/main.rs"
-
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
 hex.workspace = true
 postgres.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tiny-keccak.workspace = true
-ugraph-core = { path = "../core/crates/ugraph-core" }
-ugraph-runtime = { path = "../core/crates/ugraph-runtime" }
-ugraph-service = { path = "../core/crates/ugraph-service" }
+ugraph-core = { path = "../ugraph-core" }
+ugraph-runtime = { path = "../ugraph-runtime" }

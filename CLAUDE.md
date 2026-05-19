@@ -3,9 +3,10 @@
 ## Architecture Updates
 
 - The Rust workspace now lives at the repository root. `core/` owns libraries,
-  fixtures, docs, and Docker runtime assets; `cli/` owns the `ugraph` binary.
-  Run Cargo commands from the repository root and reference GrowFi fixtures as
-  `core/examples/growfi/...`.
+  fixtures, docs, Docker runtime assets, and the `ugraph-node` runtime package;
+  `cli/` owns the user/operator `ugraph` binary. The core Docker image must not
+  copy `cli/`. Run Cargo commands from the repository root and reference
+  GrowFi fixtures as `core/examples/growfi/...`.
 - Production uses a shared multi-chain feed, not one RPC scanner per subgraph.
 - Run one `chain-reader` per `chain_id`. Each reader owns RPC polling for that
   chain and writes raw blocks/logs to Postgres.
@@ -51,9 +52,10 @@
   data backfills into the hot-path `migrate` routine.
 - Implemented feed schema tables: `ugraph_feed_subscriptions`,
   `ugraph_raw_blocks`, and `ugraph_raw_logs`.
-- Docker supports `UGRAPH_MODE=serve|indexer|chain-reader`. The entrypoint also
-  forwards normal `ugraph` subcommands such as `deploy`, `chain-reader`, and
-  `--help`.
+- Docker supports `UGRAPH_MODE=serve|indexer|chain-reader` through
+  `ugraph-node`. The core entrypoint only forwards node runtime commands
+  (`serve`, `sync`, `chain-reader`, `--help`); user/admin CLI commands stay in
+  the separate `ugraph` binary under `cli/`.
 - The public homepage is served from `/` and `/status` as a brutalist
   terminal-style status page with a single `made by turinglabs_` credit linked
   to `https://turinglabs.org`. It lists public deployment metadata and the

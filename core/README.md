@@ -90,7 +90,8 @@ UGRAPH_PORT=8030
 
 ## Container Runtime
 
-The image uses the same binary for the API and indexer:
+The image uses `ugraph-node` for the API, indexer, and chain reader. It does
+not include the user/operator `ugraph` CLI from `cli/`:
 
 - `UGRAPH_MODE=serve` exposes `/graphql`, `/`, `/status`, `/healthz`, and
   `/metrics`. It also accepts hosted-provider compatible query paths at

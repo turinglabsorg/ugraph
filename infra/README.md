@@ -46,12 +46,12 @@ remains available with `UGRAPH_LOG_SOURCE=rpc`.
 ## CLI Image
 
 ```bash
-docker build -f infra/Dockerfile -t ugraph-core .
-docker run --rm ugraph-core --help
+docker build -f infra/Dockerfile -t ugraph-cli .
+docker run --rm ugraph-cli --help
 ```
 
-The same image shape can be promoted to managed container hosts once provider
-automation is implemented.
+This image is for user/operator commands. The production core runtime image is
+built from `core/Dockerfile` and runs `ugraph-node` only.
 
 The builder image uses Rust 1.88+ because Wasmtime 38 requires it.
 

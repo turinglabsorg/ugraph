@@ -2,6 +2,8 @@
 members = [
   "core/crates/ugraph-core",
   "core/crates/ugraph-runtime",
+  "core/crates/ugraph-service",
+  "core/crates/ugraph-node",
   "cli"
 ]
 resolver = "2"

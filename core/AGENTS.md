@@ -230,7 +230,8 @@ focused tests. Redis is out of scope.
 
 ## Containers
 
-The single Docker image is mode-driven:
+The single Docker image is mode-driven and runs `ugraph-node`, not the
+user/operator `ugraph` CLI:
 
 - `UGRAPH_MODE=serve` runs the GraphQL API.
 - `UGRAPH_MODE=indexer` runs `sync --watch`.

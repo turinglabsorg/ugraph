@@ -2,9 +2,9 @@ FROM rust:1.88-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-COPY cli ./cli
 COPY core/crates ./core/crates
-RUN cargo build --release -p ugraph
+RUN sed -i '/"cli"/d' Cargo.toml
+RUN cargo build --release -p ugraph-node
 
 FROM debian:bookworm-slim
 
@@ -13,7 +13,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/ugraph /usr/local/bin/ugraph
+COPY --from=builder /app/target/release/ugraph-node /usr/local/bin/ugraph-node
 COPY core/examples ./examples
 COPY core/docker/entrypoint.sh /usr/local/bin/ugraph-entrypoint
 RUN chmod +x /usr/local/bin/ugraph-entrypoint

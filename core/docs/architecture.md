@@ -161,11 +161,13 @@ for arbitrary historical density.
 
 ## Container Model
 
-The core ships a single Docker image. `UGRAPH_MODE=serve` runs the API, and
-`UGRAPH_MODE=indexer` runs the live `sync --watch` worker. The same image can be
-used on a local Docker host, DigitalOcean App Platform, or any container
-runtime. `docker-compose.yml` is the local production-shaped smoke with
-Postgres, indexer, and API.
+The core ships a single Docker image built from the `ugraph-node` runtime
+package. `UGRAPH_MODE=serve` runs the API, and `UGRAPH_MODE=indexer` runs the
+live `sync --watch` worker. The same image can be used on a local Docker host,
+DigitalOcean App Platform, or any container runtime. `docker-compose.yml` is
+the local production-shaped smoke with Postgres, indexer, and API. User and
+admin commands live in the separate `ugraph` CLI package and are not copied into
+the core image.
 
 For the shared-feed model, the same image supports
 `UGRAPH_MODE=chain-reader`. That process owns RPC polling for one `chain_id`

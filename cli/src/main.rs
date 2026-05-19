@@ -1,8 +1,3 @@
-mod query;
-mod server;
-mod state;
-mod storage;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -21,13 +16,14 @@ use ugraph_core::{
     EntitySchema, Manifest, MatchedLog, RpcResolverOptions, ScanOptions, ScanReport,
     ScanSourceReport, SourcePlan,
 };
+use ugraph_service::{query, server, state, storage};
 
-use crate::state::{
+use ugraph_service::state::{
     entity_store_from_snapshot, historical_snapshot_from_store, materialize_historical_snapshot,
     snapshot_from_store, DynamicSourceSnapshot, HistoricalSnapshot, ProcessedLogSnapshot,
     SyncCheckpoint,
 };
-use crate::storage::SnapshotStore;
+use ugraph_service::storage::SnapshotStore;
 
 type LogIdentity = (String, bool, String, u64, u64, u64, String);
 const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;

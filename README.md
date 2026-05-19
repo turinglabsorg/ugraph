@@ -3,8 +3,9 @@
 `ugraph` is split into two layers:
 
 - `core/`: Rust Graph Protocol-compatible libraries, fixtures, docs, and
-  Docker runtime assets.
-- `cli/`: the `ugraph` operator binary.
+  Docker runtime assets. The production container builds `ugraph-node` from
+  `core/crates/ugraph-node` and does not copy the user CLI source.
+- `cli/`: the `ugraph` operator binary for local/user/admin commands.
 - `infra/`: container and serverless deployment layer for running `core` online.
 
 The storage target is Postgres. SQLite can be used for local development and
@@ -36,9 +37,10 @@ That command should create or reuse the shared infrastructure, ensure readers
 exist for the required chains, register the deployment, run sync, and expose
 GraphQL/GraphiQL.
 
-The current implementation supports the local version of that flow. The same
-Docker image can run as `serve`, `indexer`, or `chain-reader`; `docker compose`
-starts Postgres, the shared reader, the feed-backed indexer, and the API.
+The current implementation supports the local version of that flow. The core
+Docker image runs only the node runtime modes: `serve`, `indexer`, or
+`chain-reader`; `docker compose` starts Postgres, the shared reader, the
+feed-backed indexer, and the API.
 Local `deploy` loops bounded reader/sync passes so dynamic data sources created
 by mappings are subscribed, backfilled, and indexed before the command reports
 success.
@@ -54,6 +56,7 @@ version paths are accepted only when they match registered deployment metadata.
 ```bash
 cargo test
 cargo run -p ugraph -- doctor --manifest core/examples/growfi/subgraph.yaml
+cargo run -p ugraph-node -- serve --help
 docker build -f core/Dockerfile -t ugraph-core:local .
 ```
 

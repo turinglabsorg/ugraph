@@ -2235,6 +2235,7 @@ dependencies = [
  "tiny-keccak",
  "ugraph-core",
  "ugraph-runtime",
+ "ugraph-service",
 ]
 
 [[package]]
@@ -2254,6 +2255,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ugraph-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "ugraph-core",
+ "ugraph-runtime",
+ "ugraph-service",
+]
+
+[[package]]
 name = "ugraph-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2266,6 +2281,21 @@ dependencies = [
  "tiny-keccak",
  "ugraph-core",
  "wasmtime",
+]
+
+[[package]]
+name = "ugraph-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "postgres",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tiny-keccak",
+ "ugraph-core",
+ "ugraph-runtime",
 ]
 
 [[package]]

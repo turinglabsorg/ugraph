@@ -4,7 +4,9 @@
 
 - The repository root is the Rust workspace. `core/` contains the Graph
   Protocol-compatible libraries, docs, Docker runtime assets, and compatibility
-  fixtures. `cli/` contains the `ugraph` binary.
+  fixtures. `core/crates/ugraph-node` contains the node runtime binary used by
+  the core Docker image. `cli/` contains the user/operator `ugraph` binary and
+  must not be copied into the core Docker image.
 - `infra/` is reserved for taking `core` online: Docker images, Cloud Run service definitions, managed database wiring, secrets, observability, and deployment scripts.
 - The project must stay agnostic. GrowFi under `core/examples/growfi/` is only a real fixture, never hardcoded business logic.
 
@@ -128,8 +130,9 @@
   optional GraphQL conformance when both `--endpoint` and `--cases-file` are
   provided. Use it for fixture reports instead of ad hoc command bundles.
 - `core` has a single Docker image controlled by
-  `UGRAPH_MODE=serve|indexer|chain-reader` and a local `docker-compose.yml`
-  with Postgres, a shared chain reader, a feed-backed indexer, and API.
+  `UGRAPH_MODE=serve|indexer|chain-reader` through `ugraph-node` and a local
+  `docker-compose.yml` with Postgres, a shared chain reader, a feed-backed
+  indexer, and API.
 - `core chain-reader` registers static manifest subscriptions when a manifest
   is provided, reads raw logs for one `chain_id`, and writes them into
   Postgres feed tables. `core sync --log-source postgres-feed` consumes that
