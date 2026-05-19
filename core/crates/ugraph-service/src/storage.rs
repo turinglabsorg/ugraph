@@ -1254,10 +1254,7 @@ fn load_postgres_snapshot(
     deployment: &str,
     include_history: bool,
 ) -> anyhow::Result<Option<StoreSnapshot>> {
-    let Some(row) = client.query_opt(
-        "select version, manifest, checkpoint, schema, history from ugraph_deployments where id = $1",
-        &[&deployment],
-    )?
+    let Some(row) = client.query_opt(postgres_snapshot_query(include_history), &[&deployment])?
     else {
         return Ok(None);
     };
@@ -1265,12 +1262,12 @@ fn load_postgres_snapshot(
     let manifest: String = row.get("manifest");
     let checkpoint_value: Value = row.get("checkpoint");
     let schema_value: Value = row.get("schema");
-    let history_value: Value = row.get("history");
     let checkpoint: SyncCheckpoint =
         serde_json::from_value(checkpoint_value).context("decoding postgres checkpoint")?;
     let schema: EntitySchema =
         serde_json::from_value(schema_value).context("decoding postgres schema")?;
     let history = if include_history {
+        let history_value: Value = row.get("history");
         let legacy_history: Vec<HistoricalSnapshot> =
             serde_json::from_value(history_value).context("decoding postgres history")?;
         let stored_history = load_postgres_history(client, deployment)?;
@@ -1365,6 +1362,14 @@ fn load_postgres_snapshot(
         processed_logs,
         history,
     }))
+}
+
+fn postgres_snapshot_query(include_history: bool) -> &'static str {
+    if include_history {
+        "select version, manifest, checkpoint, schema, history from ugraph_deployments where id = $1"
+    } else {
+        "select version, manifest, checkpoint, schema from ugraph_deployments where id = $1"
+    }
 }
 
 fn load_postgres_status(
@@ -2897,6 +2902,12 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|row| row.id == "0xold" && row.removed));
         assert!(rows.iter().any(|row| row.id == "0xnew" && !row.removed));
+    }
+
+    #[test]
+    fn current_snapshot_query_excludes_legacy_history_json() {
+        assert!(postgres_snapshot_query(true).contains("history"));
+        assert!(!postgres_snapshot_query(false).contains("history"));
     }
 
     #[test]
