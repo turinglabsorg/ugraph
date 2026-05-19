@@ -1200,17 +1200,53 @@ fn row_to_deployment_version(row: postgres::Row) -> DeploymentVersionRecord {
     }
 }
 
+const ENTITY_CHANGES_BACKFILL_SETTING: &str = "migration.entity_changes_backfill.v1";
+
 fn migrate(client: &mut Client) -> anyhow::Result<()> {
+    if schema_ready_for_hot_path(client)? {
+        return Ok(());
+    }
     let key = "ugraph:schema";
     client.query_one("select pg_advisory_lock(hashtextextended($1, 0))", &[&key])?;
+    client.batch_execute("set lock_timeout = '5000ms'")?;
     let schema_result = client.batch_execute(POSTGRES_SCHEMA);
+    let reset_result = client.batch_execute("reset lock_timeout");
     let unlock_result = client.query_one(
         "select pg_advisory_unlock(hashtextextended($1, 0))",
         &[&key],
     );
     schema_result?;
+    reset_result?;
     unlock_result?;
     Ok(())
+}
+
+fn schema_ready_for_hot_path(client: &mut Client) -> anyhow::Result<bool> {
+    let row = client.query_one(
+        r#"
+        select
+          to_regclass('public.ugraph_settings') is not null as has_settings,
+          to_regclass('public.ugraph_deployments') is not null as has_deployments,
+          to_regclass('public.ugraph_deployment_versions') is not null as has_versions,
+          to_regclass('public.ugraph_sync_checkpoints') is not null as has_checkpoints,
+          to_regclass('public.ugraph_entity_changes') is not null as has_changes
+        "#,
+        &[],
+    )?;
+    let has_settings: bool = row.get("has_settings");
+    let has_runtime_tables: bool = row.get::<_, bool>("has_deployments")
+        && row.get::<_, bool>("has_versions")
+        && row.get::<_, bool>("has_checkpoints")
+        && row.get::<_, bool>("has_changes");
+    if !has_settings || !has_runtime_tables {
+        return Ok(false);
+    }
+    Ok(client
+        .query_opt(
+            "select 1 from ugraph_settings where key = $1 and value = 'true'::jsonb",
+            &[&ENTITY_CHANGES_BACKFILL_SETTING],
+        )?
+        .is_some())
 }
 
 fn load_postgres_snapshot(
