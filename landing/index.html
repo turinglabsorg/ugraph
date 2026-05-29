@@ -35,35 +35,41 @@
               <a class="button" href="#architecture">Architecture</a>
             </nav>
           </div>
-          <aside class="console" aria-label="UGraph status preview">
-            <div class="console-head">
-              <span>status</span>
-              <strong>OPERATIONAL</strong>
+          <aside class="product-map" aria-label="UGraph deployment model">
+            <div class="map-head">
+              <span>what ships</span>
+              <strong>runtime + control plane</strong>
             </div>
-            <dl class="metrics">
-              <div>
-                <dt>Block</dt>
-                <dd>10866837</dd>
-              </div>
-              <div>
-                <dt>Entities</dt>
-                <dd>1842</dd>
-              </div>
-              <div>
-                <dt>Changes</dt>
-                <dd>416</dd>
-              </div>
-              <div>
-                <dt>Errors</dt>
-                <dd>0</dd>
-              </div>
-            </dl>
-            <ul class="terminal">
-              <li><span>$ endpoint</span><code>/subgraphs/growfi/latest/gn</code></li>
-              <li><span>$ visibility</span><code>public | private</code></li>
-              <li><span>$ auth</span><code>owner mode</code></li>
-              <li><span>$ refresh</span><code>10 seconds</code></li>
-            </ul>
+            <div class="stage-list">
+              <article class="stage">
+                <span>01</span>
+                <div>
+                  <h2>Upload subgraph bundles</h2>
+                  <p>UGraph accepts the Graph Protocol shape developers already use: manifest, schema, ABIs, mappings, and templates.</p>
+                </div>
+              </article>
+              <article class="stage">
+                <span>02</span>
+                <div>
+                  <h2>Sync into isolated versions</h2>
+                  <p>Each deploy can index into its own storage deployment before it becomes the live version.</p>
+                </div>
+              </article>
+              <article class="stage">
+                <span>03</span>
+                <div>
+                  <h2>Promote when ready</h2>
+                  <p>The latest alias moves only after the version is synced, so previous endpoints stay queryable.</p>
+                </div>
+              </article>
+              <article class="stage">
+                <span>04</span>
+                <div>
+                  <h2>Choose the access model</h2>
+                  <p>Run an owner-locked private instance or a separate public instance for community deploys.</p>
+                </div>
+              </article>
+            </div>
           </aside>
         </header>
       </section>
@@ -71,18 +77,18 @@
       <section class="shell strip" aria-label="Runtime capabilities">
         <div class="metric-block">
           <span class="label">01</span>
-          <strong>Standard subgraph bundles</strong>
-          <p>Manifest, schema, ABIs, templates, and compiled AssemblyScript mappings stay in the familiar Graph Protocol shape.</p>
+          <strong>Graph-compatible developer workflow</strong>
+          <p>Keep subgraph project structure familiar while moving indexing and hosting into infrastructure you control.</p>
         </div>
         <div class="metric-block">
           <span class="label">02</span>
-          <strong>Versioned hosted endpoints</strong>
-          <p>Deploy a version, sync it into isolated storage, then promote it behind a stable latest alias.</p>
+          <strong>Hosted deploys without vendor lock-in</strong>
+          <p>The CLI uploads bundles to your instance and exposes Graph Node-style URLs for apps and index consumers.</p>
         </div>
         <div class="metric-block">
           <span class="label">03</span>
-          <strong>Instance-level access policy</strong>
-          <p>Run a private owner-controlled instance or a public instance where approved users can publish.</p>
+          <strong>Operator-grade visibility</strong>
+          <p>Health, GraphiQL, metrics, deployment metadata, and entity-change history live next to the query surface.</p>
         </div>
       </section>
 
@@ -159,8 +165,8 @@ ugraph deploy \
           </article>
           <article>
             <span class="label">operations</span>
-            <h3>Status-first runtime</h3>
-            <p>The public status surface shows checkpoints, entity deltas, GraphiQL, health, and Prometheus metrics from the same node.</p>
+            <h3>Observable runtime</h3>
+            <p>The operational surface shows checkpoints, entity deltas, GraphiQL, health, and Prometheus metrics from the same node.</p>
           </article>
           <article>
             <span class="label">versions</span>

@@ -102,8 +102,8 @@ a:hover {
 
 .hero-grid {
   display: grid;
-  grid-template-columns: 130px minmax(0, 1fr) minmax(340px, 0.74fr);
-  min-height: calc(100vh - 70px);
+  grid-template-columns: 120px minmax(0, 1fr) minmax(390px, 0.88fr);
+  min-height: 640px;
   border-bottom: 0;
 }
 
@@ -144,7 +144,7 @@ p {
 
 h1 {
   margin-bottom: 18px;
-  font-size: clamp(76px, 14vw, 164px);
+  font-size: clamp(72px, 11vw, 138px);
   line-height: 0.82;
   font-weight: 700;
   text-transform: uppercase;
@@ -152,7 +152,7 @@ h1 {
 
 h2 {
   margin-bottom: 14px;
-  font-size: clamp(38px, 6vw, 86px);
+  font-size: clamp(34px, 4.2vw, 56px);
   line-height: 0.92;
   font-weight: 700;
   text-transform: uppercase;
@@ -210,7 +210,7 @@ h3 {
   background: var(--acid);
 }
 
-.console {
+.product-map {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -218,7 +218,7 @@ h3 {
   background: #101010;
 }
 
-.console-head {
+.map-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -232,44 +232,50 @@ h3 {
   text-transform: uppercase;
 }
 
-.metrics {
+.stage-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: 0;
-  border-bottom: 3px solid var(--line);
+  flex: 1;
+  grid-template-rows: repeat(4, minmax(0, 1fr));
 }
 
-.metrics div {
+.stage {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 16px;
   min-width: 0;
-  padding: 18px 14px;
-  border-right: 3px solid var(--line);
+  align-items: start;
+  padding: 22px 18px;
   border-bottom: 3px solid var(--line);
 }
 
-.metrics div:nth-child(2n) {
-  border-right: 0;
-}
-
-.metrics div:nth-last-child(-n + 2) {
+.stage:last-child {
   border-bottom: 0;
 }
 
-dt {
-  color: var(--muted);
-  font-size: 11px;
+.stage > span {
+  display: grid;
+  min-height: 38px;
+  place-items: center;
+  background: var(--paper);
+  color: var(--void);
+  font-size: 12px;
   font-weight: 700;
+}
+
+.stage h2 {
+  margin-bottom: 10px;
+  color: var(--ink);
+  font-size: clamp(22px, 2.6vw, 34px);
+  font-weight: 700;
+  line-height: 1;
   text-transform: uppercase;
 }
 
-dd {
-  margin: 8px 0 0;
-  overflow: hidden;
-  color: var(--acid);
-  font-size: 28px;
-  font-weight: 700;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.stage p {
+  margin: 0;
+  color: #c8c1ad;
+  font-size: 15px;
+  line-height: 1.42;
 }
 
 .terminal {
@@ -352,6 +358,10 @@ code {
   border-right: 3px solid var(--line);
 }
 
+.section-title h2 {
+  overflow-wrap: anywhere;
+}
+
 .flow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
@@ -402,6 +412,8 @@ pre {
   color: var(--ink);
   font-size: 15px;
   line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 pre code {
@@ -459,10 +471,14 @@ pre code {
     font-size: clamp(56px, 20vw, 98px);
   }
 
-  .console {
+  .product-map {
     grid-column: 1 / -1;
     border-left: 0;
     border-top: 3px solid var(--line);
+  }
+
+  .stage-list {
+    grid-template-rows: repeat(4, auto);
   }
 
   .strip,
@@ -544,23 +560,13 @@ pre code {
     font-size: 17px;
   }
 
-  .metrics {
-    grid-template-columns: 1fr;
-  }
-
-  .metrics div,
-  .metrics div:nth-child(2n),
-  .metrics div:nth-last-child(-n + 2) {
-    border-right: 0;
-    border-bottom: 3px solid var(--line);
-  }
-
-  .metrics div:last-child {
-    border-bottom: 0;
-  }
-
   .terminal li {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .stage {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
 }
