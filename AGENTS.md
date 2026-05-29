@@ -152,8 +152,8 @@
 - `core deploy --provider local` records deployment metadata in Postgres when
   available: version label, `public|private` visibility, owner user, and the
   API key prefix used for the deploy. API keys with `deploy` scope can create
-  or update deploy metadata; private GraphQL deployments require a key with
-  `query` scope.
+  or update deploy metadata; private GraphQL deployments require an owner or
+  admin key with `query` scope.
 - The hosted control-plane path starts with `ugraph auth login --endpoint <url>
   --api-key <key>`, which writes `~/.ugraph/config.json`. `ugraph deploy
   --provider remote` uploads a compiled subgraph bundle to `POST
@@ -164,6 +164,10 @@
   deploy script generates or reuses `UGRAPH_BOOTSTRAP_API_KEY` so a fresh
   hosted instance can accept remote deploys before database-backed API keys
   exist.
+- `UGRAPH_DEPLOY_AUTH_MODE=owner|open` controls hosted remote deploy
+  authorization per instance. `owner` is the default and restricts owned
+  deployments to the owner or an admin API key; `open` is for a separate public
+  instance where any deploy-scoped key may publish.
 - `core deployments` lists deployment ownership/version metadata, can register
   or update the current version label without running a sync, and can change a
   deployment's query visibility. Deployment ids are unique Postgres primary

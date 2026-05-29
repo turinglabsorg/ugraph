@@ -58,6 +58,9 @@ serves the current deployment through Graph Node/Goldsky-style paths:
 `/subgraphs/<deployment>/<version>/gn`,
 `/subgraphs/<deployment>/<version>/graphql`, and the `latest` alias. Explicit
 version paths are accepted only when they match registered deployment metadata.
+Hosted instances can choose their deploy policy with `UGRAPH_DEPLOY_AUTH_MODE`:
+`owner` allows only the deployment owner or an admin API key to update owned
+deployments, while `open` allows any key with `deploy` scope to publish.
 
 ## Local Development
 

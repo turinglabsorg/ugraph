@@ -138,6 +138,10 @@ not include the user/operator `ugraph` CLI from `cli/`:
   the hosted API before database-backed users have been created. It grants only
   remote deploy access; database API keys remain the preferred long-term key
   source.
+- `UGRAPH_DEPLOY_AUTH_MODE=owner|open` selects the hosted remote deploy policy.
+  `owner` is the default and lets only the deployment owner or an admin API key
+  update owned deployments. `open` lets any key with `deploy` scope publish,
+  which is useful for a public multi-tenant instance.
 
 `docker-compose.yml` starts Postgres, a shared `chain-reader`, a feed-backed
 indexer worker, and the API locally. The API reloads the selected store on each
@@ -228,11 +232,17 @@ has `deploy` scope. The server writes the bundle under
 `UGRAPH_REMOTE_DEPLOY_DIR`, runs `ugraph-node sync` against a physical storage
 deployment named `<deployment>@<version>`, records deployment metadata, and
 promotes the version so `/subgraphs/<deployment>/latest/gn` points at it.
+When `UGRAPH_DEPLOY_AUTH_MODE=owner`, the first database-backed deploy key that
+records metadata claims the deployment owner. After that, only the owner or an
+admin key can deploy new versions. Set `UGRAPH_DEPLOY_AUTH_MODE=open` on a
+separate public instance when any deploy-scoped key should be allowed to
+publish.
 
 `users signup enable|disable|status` controls whether public user creation is
 allowed by future HTTP control-plane endpoints. The current default is
 disabled. Query serving uses deployment metadata: deployments marked `public`
-are open, deployments marked `private` require an API key with `query` scope.
+are open, deployments marked `private` require an owner or admin API key with
+`query` scope.
 Deployments without metadata remain public so existing local and cloud
 instances are not locked out during upgrades.
 

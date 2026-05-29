@@ -116,6 +116,10 @@ promote the requested version to the `latest` query alias when sync succeeds.
 The deploy script creates or reuses `UGRAPH_BOOTSTRAP_API_KEY` in
 `/opt/ugraph/.env` and prints the matching `ugraph auth login ...` command at
 the end of each deploy.
+The default deploy policy is `UGRAPH_DEPLOY_AUTH_MODE=owner`, which means an
+owned deployment can only be updated by its owner or an admin API key. Use
+`UGRAPH_DEPLOY_AUTH_MODE=open` for a separate public instance where any
+deploy-scoped key may publish.
 
 ## Users and API keys
 
@@ -129,9 +133,9 @@ the database. The schema supports:
 - deployment metadata with version label, owner, API-key prefix, and
   `public|private` visibility.
 
-Private deployments require `Authorization: Bearer <key>` or `x-api-key` with
-`query` scope on `/graphql`. Deployments without metadata stay public during
-upgrades.
+Private deployments require `Authorization: Bearer <key>` or `x-api-key` from
+the deployment owner or an admin key with `query` scope. Deployments without
+metadata stay public during upgrades.
 
 ## Destroy
 

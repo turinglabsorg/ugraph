@@ -670,6 +670,16 @@ pub fn list_deployment_versions(
     Ok(rows.into_iter().map(row_to_deployment_version).collect())
 }
 
+pub fn deployment_version(
+    url: &str,
+    deployment: &str,
+    version_label: &str,
+) -> anyhow::Result<Option<DeploymentVersionRecord>> {
+    let mut client = connect(url)?;
+    migrate(&mut client)?;
+    load_deployment_version(&mut client, deployment, version_label)
+}
+
 pub fn resolve_deployment_storage(
     url: &str,
     deployment: &str,
@@ -3254,6 +3264,13 @@ mod tests {
         assert_eq!(
             resolve_deployment_storage(&url, &deployment, "v2")?.as_deref(),
             Some(versioned_deployment.as_str())
+        );
+        assert_eq!(
+            deployment_version(&url, &deployment, "v2")?
+                .context("version should exist")?
+                .owner_email
+                .as_deref(),
+            Some(email.as_str())
         );
         assert_eq!(
             resolve_deployment_storage(&url, &deployment, "latest")?.as_deref(),

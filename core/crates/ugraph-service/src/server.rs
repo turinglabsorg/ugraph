@@ -110,7 +110,23 @@ struct RemoteDeployResponse {
 
 struct DeployKeyActor {
     user: serde_json::Value,
+    user_id: Option<String>,
+    role: String,
     database_api_key: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DeployAuthMode {
+    Owner,
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum GraphqlAuthorization {
+    Authorized,
+    MissingApiKey,
+    InvalidApiKey,
+    Forbidden,
 }
 
 pub fn serve_store(
@@ -295,9 +311,14 @@ fn handle_store_connection(
                 endpoint,
                 query_string,
             ),
-            "POST" => {
-                handle_graphql_post(&mut stream, &query_store, &meta_deployment, &headers, body)
-            }
+            "POST" => handle_graphql_post(
+                &mut stream,
+                &query_store,
+                &meta_deployment,
+                endpoint.version,
+                &headers,
+                body,
+            ),
             _ => write_response(
                 &mut stream,
                 "405 Method Not Allowed",
@@ -461,6 +482,37 @@ fn handle_remote_deploy(
         }
     };
     let metadata_api_key = actor.database_api_key.then_some(key);
+    if request.deployment.as_str() != served_deployment {
+        return write_json_status(
+            stream,
+            "400 Bad Request",
+            &json!({
+                "errors": [{
+                    "message": format!(
+                        "this ugraph instance serves deployment `{served_deployment}`; remote deploy requested `{}`",
+                        request.deployment
+                    )
+                }]
+            }),
+        );
+    }
+    match authorize_remote_deploy(url, &request.deployment, &actor) {
+        Ok(true) => {}
+        Ok(false) => {
+            return write_json_status(
+                stream,
+                "403 Forbidden",
+                &json!({ "errors": [{ "message": "api key cannot deploy this deployment" }] }),
+            );
+        }
+        Err(error) => {
+            return write_json_status(
+                stream,
+                "503 Service Unavailable",
+                &json!({ "errors": [{ "message": error.to_string() }] }),
+            );
+        }
+    }
     match run_remote_deploy(url, served_deployment, metadata_api_key, &request) {
         Ok(response) => write_json(
             stream,
@@ -576,8 +628,12 @@ fn run_remote_deploy(
 
 fn verify_deploy_key(postgres_url: &str, key: &str) -> anyhow::Result<Option<DeployKeyActor>> {
     if let Some(user) = storage::verify_api_key_scope(postgres_url, key, "deploy")? {
+        let user_id = user.id.clone();
+        let role = user.role.clone();
         return Ok(Some(DeployKeyActor {
-            user: serde_json::to_value(user)?,
+            user: serde_json::to_value(&user)?,
+            user_id: Some(user_id),
+            role,
             database_api_key: true,
         }));
     }
@@ -591,10 +647,43 @@ fn verify_deploy_key(postgres_url: &str, key: &str) -> anyhow::Result<Option<Dep
                 "email": "bootstrap@ugraph.local",
                 "role": "admin"
             }),
+            user_id: None,
+            role: "admin".to_string(),
             database_api_key: false,
         }));
     }
     Ok(None)
+}
+
+fn authorize_remote_deploy(
+    postgres_url: &str,
+    deployment: &str,
+    actor: &DeployKeyActor,
+) -> anyhow::Result<bool> {
+    if remote_deploy_auth_mode()? == DeployAuthMode::Open {
+        return Ok(true);
+    }
+    let Some(metadata) = storage::deployment_metadata(postgres_url, deployment)? else {
+        return Ok(true);
+    };
+    Ok(actor_can_access_owner(
+        actor.user_id.as_deref(),
+        &actor.role,
+        metadata.owner_user_id.as_deref(),
+    ))
+}
+
+fn remote_deploy_auth_mode() -> anyhow::Result<DeployAuthMode> {
+    match std::env::var("UGRAPH_DEPLOY_AUTH_MODE")
+        .unwrap_or_else(|_| "owner".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "owner" => Ok(DeployAuthMode::Owner),
+        "open" => Ok(DeployAuthMode::Open),
+        other => anyhow::bail!("UGRAPH_DEPLOY_AUTH_MODE must be `owner` or `open`, got `{other}`"),
+    }
 }
 
 fn run_remote_sync(
@@ -743,7 +832,13 @@ fn handle_graphql_get(
     if let Some(query_string) = query_string {
         let params = parse_query_params(query_string);
         if let Some(query) = params.get("query") {
-            if !write_if_graphql_unauthorized(stream, store, headers)? {
+            if !write_if_graphql_unauthorized(
+                stream,
+                store,
+                meta_deployment,
+                endpoint.version,
+                headers,
+            )? {
                 return Ok(());
             }
             let variables = params
@@ -782,10 +877,11 @@ fn handle_graphql_post(
     stream: &mut TcpStream,
     store: &SnapshotStore,
     meta_deployment: &str,
+    version_label: Option<&str>,
     headers: &BTreeMap<String, String>,
     body: &[u8],
 ) -> anyhow::Result<()> {
-    if !write_if_graphql_unauthorized(stream, store, headers)? {
+    if !write_if_graphql_unauthorized(stream, store, meta_deployment, version_label, headers)? {
         return Ok(());
     }
     let payload =
@@ -834,15 +930,33 @@ fn load_snapshot_for_graphql(
 fn write_if_graphql_unauthorized(
     stream: &mut TcpStream,
     store: &SnapshotStore,
+    meta_deployment: &str,
+    version_label: Option<&str>,
     headers: &BTreeMap<String, String>,
 ) -> anyhow::Result<bool> {
-    match graphql_authorized(store, headers) {
-        Ok(true) => Ok(true),
-        Ok(false) => {
+    match graphql_authorized(store, meta_deployment, version_label, headers) {
+        Ok(GraphqlAuthorization::Authorized) => Ok(true),
+        Ok(GraphqlAuthorization::MissingApiKey) => {
             write_json_status(
                 stream,
                 "401 Unauthorized",
                 &json!({ "errors": [{ "message": "api key required" }] }),
+            )?;
+            Ok(false)
+        }
+        Ok(GraphqlAuthorization::InvalidApiKey) => {
+            write_json_status(
+                stream,
+                "401 Unauthorized",
+                &json!({ "errors": [{ "message": "api key is invalid or missing query scope" }] }),
+            )?;
+            Ok(false)
+        }
+        Ok(GraphqlAuthorization::Forbidden) => {
+            write_json_status(
+                stream,
+                "403 Forbidden",
+                &json!({ "errors": [{ "message": "api key cannot query this deployment" }] }),
             )?;
             Ok(false)
         }
@@ -992,20 +1106,57 @@ fn parse_headers<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, S
 
 fn graphql_authorized(
     store: &SnapshotStore,
+    meta_deployment: &str,
+    version_label: Option<&str>,
     headers: &BTreeMap<String, String>,
-) -> anyhow::Result<bool> {
-    let SnapshotStore::Postgres { url, deployment } = store else {
-        return Ok(true);
+) -> anyhow::Result<GraphqlAuthorization> {
+    let SnapshotStore::Postgres { url, .. } = store else {
+        return Ok(GraphqlAuthorization::Authorized);
     };
-    let visibility =
-        storage::deployment_visibility(url, deployment)?.unwrap_or_else(|| "public".to_string());
+    let access = graphql_deployment_access(url, meta_deployment, version_label)?;
+    let visibility = access
+        .as_ref()
+        .map(|(visibility, _)| visibility.as_str())
+        .unwrap_or("public");
     if visibility != "private" {
-        return Ok(true);
+        return Ok(GraphqlAuthorization::Authorized);
     }
     let Some(key) = request_api_key(headers) else {
-        return Ok(false);
+        return Ok(GraphqlAuthorization::MissingApiKey);
     };
-    Ok(storage::verify_api_key_scope(url, key, "query")?.is_some())
+    let Some(user) = storage::verify_api_key_scope(url, key, "query")? else {
+        return Ok(GraphqlAuthorization::InvalidApiKey);
+    };
+    let owner_user_id = access
+        .as_ref()
+        .and_then(|(_, owner_user_id)| owner_user_id.as_deref());
+    if actor_can_access_owner(Some(user.id.as_str()), &user.role, owner_user_id) {
+        Ok(GraphqlAuthorization::Authorized)
+    } else {
+        Ok(GraphqlAuthorization::Forbidden)
+    }
+}
+
+fn graphql_deployment_access(
+    postgres_url: &str,
+    deployment: &str,
+    version_label: Option<&str>,
+) -> anyhow::Result<Option<(String, Option<String>)>> {
+    if let Some(version_label) = version_label.filter(|value| *value != "latest") {
+        if let Some(version) = storage::deployment_version(postgres_url, deployment, version_label)?
+        {
+            return Ok(Some((version.visibility, version.owner_user_id)));
+        }
+    }
+    Ok(storage::deployment_metadata(postgres_url, deployment)?
+        .map(|metadata| (metadata.visibility, metadata.owner_user_id)))
+}
+
+fn actor_can_access_owner(user_id: Option<&str>, role: &str, owner_user_id: Option<&str>) -> bool {
+    let Some(owner_user_id) = owner_user_id else {
+        return true;
+    };
+    user_id == Some(owner_user_id) || (user_id.is_some() && role == "admin")
 }
 
 fn request_api_key(headers: &BTreeMap<String, String>) -> Option<&str> {
@@ -2435,6 +2586,27 @@ mod tests {
 
         let direct_headers = parse_headers(["x-api-key: direct_secret"].into_iter());
         assert_eq!(request_api_key(&direct_headers), Some("direct_secret"));
+    }
+
+    #[test]
+    fn owner_access_allows_owner_and_admin_only() {
+        assert!(actor_can_access_owner(
+            Some("user_owner"),
+            "member",
+            Some("user_owner")
+        ));
+        assert!(actor_can_access_owner(
+            Some("user_admin"),
+            "admin",
+            Some("user_owner")
+        ));
+        assert!(!actor_can_access_owner(
+            Some("user_other"),
+            "member",
+            Some("user_owner")
+        ));
+        assert!(!actor_can_access_owner(None, "admin", Some("user_owner")));
+        assert!(actor_can_access_owner(Some("user_other"), "member", None));
     }
 
     #[test]

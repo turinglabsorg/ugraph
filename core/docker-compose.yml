@@ -82,6 +82,7 @@ services:
       UGRAPH_POSTGRES_URL: postgres://ugraph:ugraph@postgres:5432/ugraph
       UGRAPH_DEPLOYMENT: growfi
       UGRAPH_BOOTSTRAP_API_KEY: ${UGRAPH_BOOTSTRAP_API_KEY:-}
+      UGRAPH_DEPLOY_AUTH_MODE: ${UGRAPH_DEPLOY_AUTH_MODE:-owner}
       UGRAPH_HOST: 0.0.0.0
       UGRAPH_PORT: "8030"
       UGRAPH_IPFS_GATEWAY: ${UGRAPH_IPFS_GATEWAY:-https://ipfs.io/ipfs/}
