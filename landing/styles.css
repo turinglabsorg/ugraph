@@ -345,7 +345,7 @@ code {
   line-height: 1.45;
 }
 
-.section-grid,
+.architecture,
 .deploy,
 .matrix {
   display: grid;
@@ -362,45 +362,84 @@ code {
   overflow-wrap: anywhere;
 }
 
-.flow {
+.arch-copy p:not(.eyebrow) {
+  max-width: 34rem;
+}
+
+.arch-map {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(190px, 0.72fr) 54px minmax(0, 1.28fr);
   min-width: 0;
 }
 
-.node {
+.reader-card {
+  display: flex;
   min-width: 0;
-  padding: 22px;
-}
-
-.node span {
-  display: inline-flex;
-  min-width: 38px;
-  min-height: 32px;
-  align-items: center;
+  flex-direction: column;
   justify-content: center;
-  margin-bottom: 18px;
-  background: var(--paper);
-  color: var(--void);
-  font-size: 12px;
-  font-weight: 700;
+  padding: 24px;
+  background: #101010;
 }
 
-.node strong {
+.reader-card strong,
+.deployment-lanes strong {
   display: block;
-  font-size: 24px;
+  margin-top: 10px;
+  font-size: 26px;
   line-height: 1;
   text-transform: uppercase;
 }
 
-.arrow {
-  display: grid;
-  place-items: center;
+.reader-card p,
+.deployment-lanes p {
+  margin: 12px 0 0;
+  color: #c8c1ad;
+  font-size: 15px;
+  line-height: 1.42;
+}
+
+.feed-bus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 14px 10px;
   border-right: 3px solid var(--line);
   border-left: 3px solid var(--line);
-  color: var(--acid);
-  font-size: 20px;
+  background: var(--acid);
+  color: var(--void);
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  text-transform: uppercase;
+}
+
+.feed-bus span,
+.feed-bus strong {
+  font-size: 12px;
   font-weight: 700;
+}
+
+.deployment-lanes {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+}
+
+.deployment-lanes article {
+  min-width: 0;
+  padding: 22px;
+  border-bottom: 3px solid var(--line);
+}
+
+.deployment-lanes article:last-child {
+  border-bottom: 0;
+}
+
+.deployment-lanes span {
+  color: var(--acid);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 pre {
@@ -482,7 +521,7 @@ pre code {
   }
 
   .strip,
-  .section-grid,
+  .architecture,
   .deploy,
   .matrix,
   .matrix-grid {
@@ -502,24 +541,25 @@ pre code {
     border-bottom: 0;
   }
 
-  .flow {
+  .arch-map {
     grid-template-columns: 1fr;
   }
 
-  .arrow {
-    min-height: 42px;
-    border-right: 0;
-    border-left: 0;
-    border-top: 3px solid var(--line);
+  .reader-card {
     border-bottom: 3px solid var(--line);
-    font-size: 0;
   }
 
-  .arrow::before {
-    content: "\2193";
-    color: var(--acid);
-    font-size: 20px;
-    font-weight: 700;
+  .feed-bus {
+    min-height: 44px;
+    flex-direction: row;
+    border-right: 0;
+    border-left: 0;
+    border-bottom: 3px solid var(--line);
+    writing-mode: horizontal-tb;
+  }
+
+  .deployment-lanes {
+    grid-template-rows: repeat(3, auto);
   }
 
   .actions {

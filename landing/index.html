@@ -92,34 +92,44 @@
         </div>
       </section>
 
-      <section id="architecture" class="shell section-grid" aria-labelledby="architecture-title">
-        <div class="section-title">
+      <section id="architecture" class="shell architecture" aria-labelledby="architecture-title">
+        <div class="section-title arch-copy">
           <p class="eyebrow">Architecture</p>
-          <h2 id="architecture-title">One feed, many deployments.</h2>
+          <h2 id="architecture-title">Shared feed, isolated subgraphs.</h2>
+          <p>
+            UGraph reads each chain once, stores canonical blocks and logs in a
+            shared feed, then lets every subgraph consume only the events it
+            subscribed to.
+          </p>
         </div>
-        <div class="flow" aria-label="UGraph architecture flow">
-          <div class="node">
-            <span>01</span>
-            <strong>chain-reader</strong>
-            <p>Reads blocks and logs for each chain ID.</p>
+        <div class="arch-map" aria-label="UGraph architecture model">
+          <div class="reader-card">
+            <span class="label">chain readers</span>
+            <strong>one reader per chain id</strong>
+            <p>Poll RPC, handle reorgs, and write raw blocks/logs once.</p>
           </div>
-          <div class="arrow" aria-hidden="true">-></div>
-          <div class="node">
-            <span>02</span>
-            <strong>raw feed</strong>
-            <p>Stores shared chain data in Postgres.</p>
+
+          <div class="feed-bus">
+            <span>Postgres raw feed</span>
+            <strong>canonical blocks + logs</strong>
           </div>
-          <div class="arrow" aria-hidden="true">-></div>
-          <div class="node">
-            <span>03</span>
-            <strong>sync worker</strong>
-            <p>Executes mappings and persists isolated entity state.</p>
-          </div>
-          <div class="arrow" aria-hidden="true">-></div>
-          <div class="node">
-            <span>04</span>
-            <strong>GraphQL</strong>
-            <p>Serves GraphiQL, public endpoints, and private API-key queries.</p>
+
+          <div class="deployment-lanes" aria-label="Isolated deployment lanes">
+            <article>
+              <span>growfi@4.0.4</span>
+              <strong>public latest</strong>
+              <p>Promoted GraphQL endpoint for apps.</p>
+            </article>
+            <article>
+              <span>growfi@next</span>
+              <strong>private staging</strong>
+              <p>Sync and compare before promotion.</p>
+            </article>
+            <article>
+              <span>other-subgraph@1</span>
+              <strong>same feed, own store</strong>
+              <p>Independent entity state and query visibility.</p>
+            </article>
           </div>
         </div>
       </section>
