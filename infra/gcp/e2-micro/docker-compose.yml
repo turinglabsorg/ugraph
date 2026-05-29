@@ -58,6 +58,7 @@ services:
       UGRAPH_STORAGE: postgres
       UGRAPH_POSTGRES_URL: postgres://${UGRAPH_POSTGRES_USER:-ugraph}:${UGRAPH_POSTGRES_PASSWORD:-ugraph}@postgres:5432/${UGRAPH_POSTGRES_DB:-ugraph}
       UGRAPH_DEPLOYMENT: ${UGRAPH_DEPLOYMENT:-growfi}
+      UGRAPH_BOOTSTRAP_API_KEY: ${UGRAPH_BOOTSTRAP_API_KEY:-}
       UGRAPH_CHAIN_ID: ${UGRAPH_CHAIN_ID:-11155111}
       UGRAPH_BLOCK_EXPLORER_URL: ${UGRAPH_BLOCK_EXPLORER_URL:-}
       UGRAPH_HOST: 0.0.0.0
@@ -67,6 +68,8 @@ services:
       UGRAPH_MAX_IPFS_FILE_BYTES: ${UGRAPH_MAX_IPFS_FILE_BYTES:-26214400}
     expose:
       - "8030"
+    volumes:
+      - ugraph-data:/data
     healthcheck:
       test:
         - CMD
@@ -137,3 +140,4 @@ volumes:
   caddy-data:
   caddy-config:
   postgres-data:
+  ugraph-data:

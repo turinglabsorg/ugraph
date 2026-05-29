@@ -28,6 +28,7 @@ generate_password() {
 }
 
 UGRAPH_POSTGRES_PASSWORD="${UGRAPH_POSTGRES_PASSWORD:-}"
+UGRAPH_BOOTSTRAP_API_KEY="${UGRAPH_BOOTSTRAP_API_KEY:-}"
 UGRAPH_DEPLOYMENT="${UGRAPH_DEPLOYMENT:-growfi}"
 UGRAPH_MANIFEST="${UGRAPH_MANIFEST:-/app/examples/growfi/subgraph.yaml}"
 UGRAPH_CHAIN_ID="${UGRAPH_CHAIN_ID:-11155111}"
@@ -151,6 +152,18 @@ if [ -z "$UGRAPH_POSTGRES_PASSWORD" ]; then
     UGRAPH_POSTGRES_PASSWORD="$(generate_password)"
   fi
 fi
+if [ -z "$UGRAPH_BOOTSTRAP_API_KEY" ]; then
+  existing_key="$(
+    "$GCLOUD" compute ssh "$VM_NAME" --project "$PROJECT_ID" --zone "$ZONE" \
+      --command "test -f '${REMOTE_DIR}/.env' && grep '^UGRAPH_BOOTSTRAP_API_KEY=' '${REMOTE_DIR}/.env' | sed 's/^UGRAPH_BOOTSTRAP_API_KEY=//'" \
+      2>/dev/null || true
+  )"
+  if [ -n "$existing_key" ]; then
+    UGRAPH_BOOTSTRAP_API_KEY="$existing_key"
+  else
+    UGRAPH_BOOTSTRAP_API_KEY="ugraph_$(generate_password)"
+  fi
+fi
 
 if [ -n "$DO_DNS_ZONE" ]; then
   case "$UGRAPH_DOMAIN" in
@@ -187,6 +200,7 @@ UGRAPH_IMAGE=${UGRAPH_IMAGE}
 UGRAPH_POSTGRES_DB=${UGRAPH_POSTGRES_DB}
 UGRAPH_POSTGRES_USER=${UGRAPH_POSTGRES_USER}
 UGRAPH_POSTGRES_PASSWORD=${UGRAPH_POSTGRES_PASSWORD}
+UGRAPH_BOOTSTRAP_API_KEY=${UGRAPH_BOOTSTRAP_API_KEY}
 UGRAPH_DEPLOYMENT=${UGRAPH_DEPLOYMENT}
 UGRAPH_MANIFEST=${UGRAPH_MANIFEST}
 UGRAPH_CHAIN_ID=${UGRAPH_CHAIN_ID}
@@ -232,9 +246,10 @@ done
 "$GCLOUD" compute ssh "$VM_NAME" --project "$PROJECT_ID" --zone "$ZONE" --command "sudo mkdir -p '${REMOTE_DIR}' && sudo chown \"\$USER\":\"\$USER\" '${REMOTE_DIR}'"
 "$GCLOUD" compute scp "${TMP_DIR}/docker-compose.yml" "${TMP_DIR}/Caddyfile" "${TMP_DIR}/.env" "${TMP_DIR}/ugraph-image.tar.gz" "${VM_NAME}:${REMOTE_DIR}/" --project "$PROJECT_ID" --zone "$ZONE"
 "$GCLOUD" compute ssh "$VM_NAME" --project "$PROJECT_ID" --zone "$ZONE" --command "chmod 600 '${REMOTE_DIR}/.env'"
-"$GCLOUD" compute ssh "$VM_NAME" --project "$PROJECT_ID" --zone "$ZONE" --command "cd '${REMOTE_DIR}' && sudo docker load -i ugraph-image.tar.gz && sudo docker compose up -d"
+"$GCLOUD" compute ssh "$VM_NAME" --project "$PROJECT_ID" --zone "$ZONE" --command "cd '${REMOTE_DIR}' && sudo docker load -i ugraph-image.tar.gz && sudo docker compose up -d && sudo docker compose restart caddy"
 
 echo "ugraph url: https://${UGRAPH_DOMAIN}"
 echo "graphql: https://${UGRAPH_DOMAIN}/graphql"
 echo "health: https://${UGRAPH_DOMAIN}/healthz"
 echo "status: https://${UGRAPH_DOMAIN}/status"
+echo "remote auth: ugraph auth login --endpoint https://${UGRAPH_DOMAIN} --api-key ${UGRAPH_BOOTSTRAP_API_KEY}"

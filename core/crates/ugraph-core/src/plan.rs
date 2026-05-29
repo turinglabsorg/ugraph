@@ -169,7 +169,7 @@ mod tests {
                 .iter()
                 .map(|source| source.triggers.len())
                 .sum::<usize>(),
-            76
+            77
         );
         assert!(plan.sources.iter().any(|source| {
             source.name == "CampaignFactory"

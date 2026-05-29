@@ -1,9 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
+    env, fs,
+    path::{Component, Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -51,6 +51,7 @@ enum LogSourceKind {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, ValueEnum)]
 enum DeployProvider {
     Local,
+    Remote,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, ValueEnum)]
@@ -74,6 +75,33 @@ enum ReorgPolicy {
     Fail,
     Rollback,
     Reset,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Save a hosted ugraph endpoint and API key to ~/.ugraph/config.json.
+    Login {
+        #[arg(long, env = "UGRAPH_ENDPOINT")]
+        endpoint: String,
+        #[arg(long, env = "UGRAPH_API_KEY")]
+        api_key: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify the configured API key against the hosted endpoint.
+    Whoami {
+        #[arg(long, env = "UGRAPH_ENDPOINT")]
+        endpoint: Option<String>,
+        #[arg(long, env = "UGRAPH_API_KEY")]
+        api_key: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the saved hosted endpoint and API key.
+    Logout {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -224,6 +252,11 @@ enum DeploymentCommand {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage hosted ugraph endpoint credentials.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Validate that a standard subgraph.yaml and all referenced files exist.
     Validate {
         #[arg(short, long, default_value = "subgraph.yaml")]
@@ -413,10 +446,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Register and sync a deployment against local infrastructure.
+    /// Register and sync a deployment locally or through a hosted ugraph endpoint.
     Deploy {
         #[arg(long, value_enum, default_value = "local")]
         provider: DeployProvider,
+        #[arg(long, env = "UGRAPH_ENDPOINT")]
+        endpoint: Option<String>,
         #[arg(short, long, default_value = "subgraph.yaml")]
         manifest: PathBuf,
         #[arg(long)]
@@ -456,6 +491,8 @@ enum Command {
         reset: bool,
         #[arg(long, env = "UGRAPH_DEPLOY_MAX_PASSES", default_value_t = 8)]
         max_passes: usize,
+        #[arg(long)]
+        no_sync: bool,
         #[arg(long, env = "UGRAPH_MAX_BLOCK_RANGE", default_value_t = 2_000)]
         max_block_range: u64,
         #[arg(long, env = "UGRAPH_RPC_RETRIES", default_value_t = 3)]
@@ -768,6 +805,39 @@ struct DeployReport {
     sync: MatrixSyncReport,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CliConfig {
+    endpoint: String,
+    api_key: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDeployFile {
+    path: String,
+    content_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDeployRequest {
+    deployment: String,
+    version: Option<String>,
+    visibility: DeploymentVisibility,
+    manifest_path: String,
+    build_dir: String,
+    chain_id: u64,
+    rpc_url: Option<String>,
+    from_block: Option<u64>,
+    to_block: Option<u64>,
+    reset: bool,
+    sync: bool,
+    limit: usize,
+    max_block_range: u64,
+    rpc_retries: u32,
+    files: Vec<RemoteDeployFile>,
+}
+
 struct SourceScanInput<'a> {
     log_source: &'a LogSource,
     chain_id: u64,
@@ -814,6 +884,73 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Auth { command } => match command {
+            AuthCommand::Login {
+                endpoint,
+                api_key,
+                json,
+            } => {
+                let config = CliConfig {
+                    endpoint: normalize_endpoint(&endpoint),
+                    api_key,
+                };
+                save_cli_config(&config)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "endpoint": config.endpoint,
+                            "config": cli_config_path()?.display().to_string()
+                        }))?
+                    );
+                } else {
+                    println!("endpoint: {}", config.endpoint);
+                    println!("config: {}", cli_config_path()?.display());
+                }
+            }
+            AuthCommand::Whoami {
+                endpoint,
+                api_key,
+                json,
+            } => {
+                let (endpoint, api_key) = resolve_remote_credentials(endpoint, api_key)?;
+                let response = remote_get(&endpoint, "/api/auth/verify", &api_key)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else {
+                    println!("endpoint: {}", endpoint);
+                    println!(
+                        "email: {}",
+                        response
+                            .get("user")
+                            .and_then(|user| user.get("email"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("<unknown>")
+                    );
+                }
+            }
+            AuthCommand::Logout { json } => {
+                let path = cli_config_path()?;
+                let removed = match fs::remove_file(&path) {
+                    Ok(()) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(error).context("removing ugraph CLI config"),
+                };
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "removed": removed,
+                            "config": path.display().to_string()
+                        }))?
+                    );
+                } else if removed {
+                    println!("removed: {}", path.display());
+                } else {
+                    println!("no config: {}", path.display());
+                }
+            }
+        },
         Command::Validate { manifest } => {
             let parsed = Manifest::load(&manifest)
                 .with_context(|| format!("loading {}", manifest.display()))?;
@@ -1282,6 +1419,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Deploy {
             provider,
+            endpoint,
             manifest,
             build_dir,
             storage,
@@ -1299,11 +1437,64 @@ fn main() -> anyhow::Result<()> {
             limit,
             reset,
             max_passes,
+            no_sync,
             max_block_range,
             rpc_retries,
             json,
         } => {
             let build_dir = default_build_dir(&manifest, build_dir);
+            if provider == DeployProvider::Remote {
+                let (endpoint, api_key) = resolve_remote_credentials(endpoint, api_key)?;
+                let version = version.or_else(default_remote_version);
+                let request = build_remote_deploy_request(RemoteDeployInput {
+                    manifest: &manifest,
+                    build_dir: &build_dir,
+                    deployment,
+                    version,
+                    visibility,
+                    chain_id,
+                    rpc_url,
+                    from_block,
+                    to_block,
+                    reset,
+                    sync: !no_sync,
+                    limit,
+                    max_block_range,
+                    rpc_retries,
+                })?;
+                let response = remote_post(&endpoint, "/api/deployments", &api_key, &request)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else {
+                    println!("provider: remote");
+                    println!("endpoint: {}", endpoint);
+                    println!("deployment: {}", request.deployment);
+                    println!(
+                        "version: {}",
+                        request.version.as_deref().unwrap_or("<server-default>")
+                    );
+                    if let Some(latest_endpoint) = response
+                        .get("latestEndpoint")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        println!("latest: {latest_endpoint}");
+                    }
+                    if let Some(version_endpoint) = response
+                        .get("versionEndpoint")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        println!("versionEndpoint: {version_endpoint}");
+                    }
+                    println!(
+                        "sync: {}",
+                        response
+                            .get("sync")
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "null".to_string())
+                    );
+                }
+                return Ok(());
+            }
             if let Some(key) = api_key.as_deref() {
                 let postgres_url = postgres_url
                     .as_deref()
@@ -2130,10 +2321,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
     }
 
     let mut last_executed_block = None;
-    loop {
-        let Some(log) = next_unprocessed_log(&pending_logs, &processed_logs) else {
-            break;
-        };
+    while let Some(log) = next_unprocessed_log(&pending_logs, &processed_logs) {
         if input.limit == 0
             || (executions.len() >= input.limit && log.block_number != last_executed_block)
         {
@@ -3191,6 +3379,241 @@ fn default_build_dir(manifest: &std::path::Path, build_dir: Option<PathBuf>) -> 
     })
 }
 
+struct RemoteDeployInput<'a> {
+    manifest: &'a Path,
+    build_dir: &'a Path,
+    deployment: String,
+    version: Option<String>,
+    visibility: DeploymentVisibility,
+    chain_id: u64,
+    rpc_url: Option<String>,
+    from_block: Option<u64>,
+    to_block: Option<u64>,
+    reset: bool,
+    sync: bool,
+    limit: usize,
+    max_block_range: u64,
+    rpc_retries: u32,
+}
+
+fn build_remote_deploy_request(
+    input: RemoteDeployInput<'_>,
+) -> anyhow::Result<RemoteDeployRequest> {
+    let manifest = input
+        .manifest
+        .canonicalize()
+        .with_context(|| format!("resolving manifest {}", input.manifest.display()))?;
+    let build_dir = input
+        .build_dir
+        .canonicalize()
+        .with_context(|| format!("resolving build dir {}", input.build_dir.display()))?;
+    let root = manifest
+        .parent()
+        .context("manifest has no parent directory")?
+        .to_path_buf();
+    Manifest::load(&manifest)
+        .with_context(|| format!("loading {}", manifest.display()))?
+        .validate_files(&manifest)
+        .with_context(|| format!("validating {}", manifest.display()))?;
+    if !build_dir.is_dir() {
+        anyhow::bail!("build dir does not exist: {}", build_dir.display());
+    }
+    let manifest_path = relative_bundle_path(&root, &manifest)?;
+    let build_dir_path = if build_dir.starts_with(&root) {
+        relative_bundle_path(&root, &build_dir)?
+    } else {
+        PathBuf::from("build")
+    };
+    let mut files = Vec::new();
+    collect_bundle_files(&root, &root, &mut files)?;
+    if !build_dir.starts_with(&root) {
+        collect_bundle_files_as(&build_dir, &build_dir, Path::new("build"), &mut files)?;
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files.dedup_by(|left, right| left.path == right.path);
+    if files.is_empty() {
+        anyhow::bail!("remote deployment bundle is empty");
+    }
+    Ok(RemoteDeployRequest {
+        deployment: input.deployment,
+        version: input.version,
+        visibility: input.visibility,
+        manifest_path: manifest_path.to_string_lossy().replace('\\', "/"),
+        build_dir: build_dir_path.to_string_lossy().replace('\\', "/"),
+        chain_id: input.chain_id,
+        rpc_url: input.rpc_url,
+        from_block: input.from_block,
+        to_block: input.to_block,
+        reset: input.reset,
+        sync: input.sync,
+        limit: input.limit,
+        max_block_range: input.max_block_range,
+        rpc_retries: input.rpc_retries,
+        files,
+    })
+}
+
+fn collect_bundle_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<RemoteDeployFile>,
+) -> anyhow::Result<()> {
+    collect_bundle_files_as(root, current, Path::new(""), files)
+}
+
+fn collect_bundle_files_as(
+    root: &Path,
+    current: &Path,
+    target_prefix: &Path,
+    files: &mut Vec<RemoteDeployFile>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(current).with_context(|| format!("reading {}", current.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if should_skip_bundle_path(&path, &file_name) {
+            continue;
+        }
+        if path.is_dir() {
+            collect_bundle_files_as(root, &path, target_prefix, files)?;
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let relative = relative_bundle_path(root, &path)?;
+        let target = target_prefix.join(relative);
+        let content = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        files.push(RemoteDeployFile {
+            path: target.to_string_lossy().replace('\\', "/"),
+            content_hex: hex::encode(content),
+        });
+    }
+    Ok(())
+}
+
+fn should_skip_bundle_path(path: &Path, file_name: &str) -> bool {
+    if file_name == ".DS_Store" {
+        return true;
+    }
+    if path.is_dir() {
+        matches!(
+            file_name,
+            ".git" | ".next" | ".graphclient" | "generated" | "node_modules" | "target"
+        )
+    } else {
+        false
+    }
+}
+
+fn relative_bundle_path(root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    let relative = path
+        .strip_prefix(root)
+        .with_context(|| format!("{} is not under {}", path.display(), root.display()))?;
+    ensure_safe_relative_path(relative)
+}
+
+fn ensure_safe_relative_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => clean.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("unsafe bundle path: {}", path.display())
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        anyhow::bail!("empty bundle path");
+    }
+    Ok(clean)
+}
+
+fn default_remote_version() -> Option<String> {
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(format!("v{seconds}"))
+}
+
+fn normalize_endpoint(endpoint: &str) -> String {
+    endpoint.trim().trim_end_matches('/').to_string()
+}
+
+fn cli_config_path() -> anyhow::Result<PathBuf> {
+    let home = env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".ugraph").join("config.json"))
+}
+
+fn load_cli_config() -> anyhow::Result<Option<CliConfig>> {
+    let path = cli_config_path()?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn save_cli_config(config: &CliConfig) -> anyhow::Result<()> {
+    let path = cli_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(config)?)
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+fn resolve_remote_credentials(
+    endpoint: Option<String>,
+    api_key: Option<String>,
+) -> anyhow::Result<(String, String)> {
+    let config = load_cli_config()?;
+    let endpoint = endpoint
+        .or_else(|| config.as_ref().map(|config| config.endpoint.clone()))
+        .context("missing --endpoint; run `ugraph auth login --endpoint <url> --api-key <key>`")?;
+    let api_key = api_key
+        .or_else(|| config.map(|config| config.api_key))
+        .context("missing --api-key; run `ugraph auth login --endpoint <url> --api-key <key>`")?;
+    Ok((normalize_endpoint(&endpoint), api_key))
+}
+
+fn remote_get(endpoint: &str, path: &str, api_key: &str) -> anyhow::Result<serde_json::Value> {
+    let url = remote_url(endpoint, path);
+    reqwest::blocking::Client::new()
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .with_context(|| format!("requesting {url}"))?
+        .error_for_status()
+        .with_context(|| format!("remote returned an error status from {url}"))?
+        .json()
+        .with_context(|| format!("decoding JSON response from {url}"))
+}
+
+fn remote_post<T: Serialize>(
+    endpoint: &str,
+    path: &str,
+    api_key: &str,
+    body: &T,
+) -> anyhow::Result<serde_json::Value> {
+    let url = remote_url(endpoint, path);
+    reqwest::blocking::Client::new()
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(body)
+        .send()
+        .with_context(|| format!("posting {url}"))?
+        .error_for_status()
+        .with_context(|| format!("remote returned an error status from {url}"))?
+        .json()
+        .with_context(|| format!("decoding JSON response from {url}"))
+}
+
+fn remote_url(endpoint: &str, path: &str) -> String {
+    format!("{}{}", normalize_endpoint(endpoint), path)
+}
+
 fn wasm_path_for_log(build_dir: &std::path::Path, log: &MatchedLog) -> PathBuf {
     if let Ok(manifest) = Manifest::load(build_dir.join("subgraph.yaml")) {
         let source = if log.template {
@@ -3540,6 +3963,56 @@ mod tests {
             0,
             Some(2)
         ));
+    }
+
+    #[test]
+    fn remote_bundle_paths_are_normalized_and_safe() {
+        assert_eq!(
+            ensure_safe_relative_path(Path::new("./build/subgraph.yaml")).unwrap(),
+            PathBuf::from("build/subgraph.yaml")
+        );
+        assert!(ensure_safe_relative_path(Path::new("../secret")).is_err());
+        assert!(ensure_safe_relative_path(Path::new("/tmp/subgraph.yaml")).is_err());
+        assert_eq!(
+            remote_url("https://ugraph.example.com/", "/api/auth/verify"),
+            "https://ugraph.example.com/api/auth/verify"
+        );
+    }
+
+    #[test]
+    fn remote_deploy_request_includes_compiled_build_files() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../core/examples/growfi")
+            .canonicalize()
+            .unwrap();
+        let request = build_remote_deploy_request(RemoteDeployInput {
+            manifest: &fixture.join("subgraph.yaml"),
+            build_dir: &fixture.join("build"),
+            deployment: "growfi".to_string(),
+            version: Some("test".to_string()),
+            visibility: DeploymentVisibility::Public,
+            chain_id: 11155111,
+            rpc_url: None,
+            from_block: None,
+            to_block: None,
+            reset: false,
+            sync: false,
+            limit: 1,
+            max_block_range: 1,
+            rpc_retries: 0,
+        })
+        .unwrap();
+
+        assert_eq!(request.manifest_path, "subgraph.yaml");
+        assert_eq!(request.build_dir, "build");
+        assert!(request
+            .files
+            .iter()
+            .any(|file| file.path == "build/subgraph.yaml"));
+        assert!(request
+            .files
+            .iter()
+            .any(|file| file.path.ends_with(".wasm")));
     }
 
     fn test_snapshot(complete: bool, validation_errors: usize) -> StoreSnapshot {

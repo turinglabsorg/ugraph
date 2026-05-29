@@ -81,6 +81,7 @@ services:
       UGRAPH_STORAGE: postgres
       UGRAPH_POSTGRES_URL: postgres://ugraph:ugraph@postgres:5432/ugraph
       UGRAPH_DEPLOYMENT: growfi
+      UGRAPH_BOOTSTRAP_API_KEY: ${UGRAPH_BOOTSTRAP_API_KEY:-}
       UGRAPH_HOST: 0.0.0.0
       UGRAPH_PORT: "8030"
       UGRAPH_IPFS_GATEWAY: ${UGRAPH_IPFS_GATEWAY:-https://ipfs.io/ipfs/}
@@ -88,6 +89,8 @@ services:
       UGRAPH_MAX_IPFS_FILE_BYTES: ${UGRAPH_MAX_IPFS_FILE_BYTES:-26214400}
     ports:
       - "8030:8030"
+    volumes:
+      - ugraph-data:/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8030/healthz"]
       interval: 5s
@@ -96,3 +99,4 @@ services:
 
 volumes:
   ugraph-postgres:
+  ugraph-data:

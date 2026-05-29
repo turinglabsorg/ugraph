@@ -27,20 +27,28 @@ subgraph:
 - Multi-chain subgraphs are represented as one deployment with multiple
   chain-scoped subscriptions.
 
-The intended operator flow is a single CLI command such as:
+The intended operator flow is a single CLI command. For a local Postgres-backed
+instance:
 
 ```bash
 ugraph deploy --provider local --deployment growfi-v1 --chain-id 11155111 --manifest subgraph.yaml --postgres-url <postgres-url> --rpc-url <rpc>
 ```
 
-That command should create or reuse the shared infrastructure, ensure readers
-exist for the required chains, register the deployment, run sync, and expose
-GraphQL/GraphiQL.
+For a hosted ugraph instance:
 
-The current implementation supports the local version of that flow. The core
-Docker image runs only the node runtime modes: `serve`, `indexer`, or
-`chain-reader`; `docker compose` starts Postgres, the shared reader, the
-feed-backed indexer, and the API.
+```bash
+ugraph auth login --endpoint https://ugraph.example.com --api-key <ugraph-api-key>
+ugraph deploy --provider remote --deployment growfi --version 4.0.4 --visibility public --chain-id 11155111 --manifest subgraph.yaml --rpc-url <rpc>
+```
+
+The remote command uploads the compiled subgraph bundle to the server, runs
+`ugraph-node sync` on the server, promotes the uploaded version, and exposes it
+through `/subgraphs/<deployment>/<version>/gn` plus the `latest` alias.
+
+The current implementation supports both the local deploy flow and the first
+remote hosted flow. The core Docker image runs the node runtime modes: `serve`,
+`indexer`, or `chain-reader`; the API mode also accepts authenticated remote
+deploy uploads under `/api/deployments`.
 Local `deploy` loops bounded reader/sync passes so dynamic data sources created
 by mappings are subscribed, backfilled, and indexed before the command reports
 success.

@@ -826,7 +826,7 @@ mod tests {
             "../../examples/growfi/build",
         )?;
         assert!(report.ok, "invalid handlers: {:?}", report.invalid_handlers);
-        assert_eq!(report.handlers.len(), 76);
+        assert_eq!(report.handlers.len(), 77);
         Ok(())
     }
 

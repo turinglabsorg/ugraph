@@ -1,12 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
+    path::{Component, Path, PathBuf},
+    process::Command,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
+use serde::Deserialize;
 use serde_json::json;
 use ugraph_runtime::{EntityData, StoreValue};
 
@@ -16,7 +20,7 @@ use crate::{
     storage::{self, SnapshotStore, StoreStatus},
 };
 
-const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_SYNC_ACTIVITY_LIMIT: usize = 8;
 const MAX_SYNC_ACTIVITY_LIMIT: usize = 50;
 
@@ -63,6 +67,50 @@ struct GraphqlEndpoint<'a> {
     path: &'a str,
     deployment: Option<&'a str>,
     version: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDeployFile {
+    path: String,
+    content_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDeployRequest {
+    deployment: String,
+    version: Option<String>,
+    visibility: Option<String>,
+    manifest_path: String,
+    build_dir: String,
+    chain_id: u64,
+    rpc_url: Option<String>,
+    from_block: Option<u64>,
+    to_block: Option<u64>,
+    reset: bool,
+    sync: bool,
+    limit: usize,
+    max_block_range: u64,
+    rpc_retries: u32,
+    files: Vec<RemoteDeployFile>,
+}
+
+struct RemoteDeployResponse {
+    deployment: String,
+    storage_deployment: String,
+    version: String,
+    bundle_dir: String,
+    latest_endpoint: String,
+    version_endpoint: String,
+    sync: serde_json::Value,
+    metadata: Option<storage::DeploymentMetadataRecord>,
+    deployment_version: Option<storage::DeploymentVersionRecord>,
+}
+
+struct DeployKeyActor {
+    user: serde_json::Value,
+    database_api_key: bool,
 }
 
 pub fn serve_store(
@@ -197,6 +245,28 @@ fn handle_store_connection(
         let status_store = latest_store_for_status(store).unwrap_or_else(|_| store.clone());
         return write_metrics(&mut stream, &status_store);
     }
+    if path == "/api/auth/verify" {
+        return match method {
+            "GET" => handle_auth_verify(&mut stream, store, &headers),
+            _ => write_response(
+                &mut stream,
+                "405 Method Not Allowed",
+                "application/json",
+                br#"{"errors":[{"message":"method not allowed"}]}"#,
+            ),
+        };
+    }
+    if path == "/api/deployments" {
+        return match method {
+            "POST" => handle_remote_deploy(&mut stream, store, &headers, body),
+            _ => write_response(
+                &mut stream,
+                "405 Method Not Allowed",
+                "application/json",
+                br#"{"errors":[{"message":"method not allowed"}]}"#,
+            ),
+        };
+    }
     if let Some(endpoint) = graphql_endpoint(path) {
         let (query_store, meta_deployment) = match resolve_graphql_store(store, endpoint) {
             Ok(Some(resolved)) => resolved,
@@ -303,6 +373,363 @@ fn graphql_endpoint(path: &str) -> Option<GraphqlEndpoint<'_>> {
         deployment: Some(deployment),
         version: Some(version),
     })
+}
+
+fn handle_auth_verify(
+    stream: &mut TcpStream,
+    store: &SnapshotStore,
+    headers: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let SnapshotStore::Postgres { url, .. } = store else {
+        return write_json_status(
+            stream,
+            "503 Service Unavailable",
+            &json!({ "errors": [{ "message": "remote auth requires postgres storage" }] }),
+        );
+    };
+    let Some(key) = request_api_key(headers) else {
+        return write_json_status(
+            stream,
+            "401 Unauthorized",
+            &json!({ "errors": [{ "message": "api key required" }] }),
+        );
+    };
+    match verify_deploy_key(url, key) {
+        Ok(Some(actor)) => write_json(stream, &json!({ "ok": true, "user": actor.user })),
+        Ok(None) => write_json_status(
+            stream,
+            "401 Unauthorized",
+            &json!({ "errors": [{ "message": "api key is invalid or missing deploy scope" }] }),
+        ),
+        Err(error) => write_json_status(
+            stream,
+            "503 Service Unavailable",
+            &json!({ "errors": [{ "message": error.to_string() }] }),
+        ),
+    }
+}
+
+fn handle_remote_deploy(
+    stream: &mut TcpStream,
+    store: &SnapshotStore,
+    headers: &BTreeMap<String, String>,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let SnapshotStore::Postgres {
+        url,
+        deployment: served_deployment,
+    } = store
+    else {
+        return write_json_status(
+            stream,
+            "503 Service Unavailable",
+            &json!({ "errors": [{ "message": "remote deploy requires postgres storage" }] }),
+        );
+    };
+    let Some(key) = request_api_key(headers) else {
+        return write_json_status(
+            stream,
+            "401 Unauthorized",
+            &json!({ "errors": [{ "message": "api key required" }] }),
+        );
+    };
+    let actor = match verify_deploy_key(url, key) {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
+            return write_json_status(
+                stream,
+                "401 Unauthorized",
+                &json!({ "errors": [{ "message": "api key is invalid or missing deploy scope" }] }),
+            );
+        }
+        Err(error) => {
+            return write_json_status(
+                stream,
+                "503 Service Unavailable",
+                &json!({ "errors": [{ "message": error.to_string() }] }),
+            );
+        }
+    };
+    let request = match serde_json::from_slice::<RemoteDeployRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return write_json_status(
+                stream,
+                "400 Bad Request",
+                &json!({ "errors": [{ "message": format!("invalid deploy request: {error}") }] }),
+            );
+        }
+    };
+    let metadata_api_key = actor.database_api_key.then_some(key);
+    match run_remote_deploy(url, served_deployment, metadata_api_key, &request) {
+        Ok(response) => write_json(
+            stream,
+            &json!({
+                "ok": true,
+                "actor": actor.user,
+                "deployment": response.deployment,
+                "storageDeployment": response.storage_deployment,
+                "version": response.version,
+                "bundleDir": response.bundle_dir,
+                "latestEndpoint": response.latest_endpoint,
+                "versionEndpoint": response.version_endpoint,
+                "sync": response.sync,
+                "metadata": response.metadata,
+                "deploymentVersion": response.deployment_version,
+            }),
+        ),
+        Err(error) => write_json_status(
+            stream,
+            "500 Internal Server Error",
+            &json!({ "errors": [{ "message": error.to_string() }] }),
+        ),
+    }
+}
+
+fn run_remote_deploy(
+    postgres_url: &str,
+    served_deployment: &str,
+    metadata_api_key: Option<&str>,
+    request: &RemoteDeployRequest,
+) -> anyhow::Result<RemoteDeployResponse> {
+    if request.deployment.trim().is_empty() {
+        anyhow::bail!("deployment is required");
+    }
+    if request.deployment != served_deployment {
+        anyhow::bail!(
+            "this ugraph instance serves deployment `{served_deployment}`; remote deploy requested `{}`",
+            request.deployment
+        );
+    }
+    let visibility = request.visibility.as_deref().unwrap_or("private");
+    if visibility != "private" && visibility != "public" {
+        anyhow::bail!("visibility must be `private` or `public`");
+    }
+    if request.files.is_empty() {
+        anyhow::bail!("remote deploy bundle is empty");
+    }
+    let version = request
+        .version
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(default_remote_version);
+    let storage_deployment = format!("{}@{}", request.deployment, version);
+    let bundle_dir = remote_bundle_dir(&request.deployment, &version)?;
+    if bundle_dir.exists() {
+        fs::remove_dir_all(&bundle_dir)
+            .with_context(|| format!("removing old bundle {}", bundle_dir.display()))?;
+    }
+    fs::create_dir_all(&bundle_dir)
+        .with_context(|| format!("creating bundle dir {}", bundle_dir.display()))?;
+    for file in &request.files {
+        write_remote_bundle_file(&bundle_dir, file)?;
+    }
+    let manifest_path = bundle_dir.join(safe_relative_path(&request.manifest_path)?);
+    let build_dir = bundle_dir.join(safe_relative_path(&request.build_dir)?);
+    if !manifest_path.is_file() {
+        anyhow::bail!("manifest was not uploaded: {}", manifest_path.display());
+    }
+    if !build_dir.is_dir() {
+        anyhow::bail!("build dir was not uploaded: {}", build_dir.display());
+    }
+    let sync = if request.sync {
+        run_remote_sync(
+            postgres_url,
+            &storage_deployment,
+            &manifest_path,
+            &build_dir,
+            request,
+        )?
+    } else {
+        json!({ "skipped": true })
+    };
+    let (metadata, deployment_version) = if request.sync {
+        let deployment_version = storage::record_deployment_version(
+            postgres_url,
+            storage::DeploymentVersionInput {
+                deployment: &request.deployment,
+                version_label: &version,
+                storage_deployment: &storage_deployment,
+                visibility,
+                owner_email: None,
+                api_key: metadata_api_key,
+                promote: true,
+            },
+        )?;
+        let metadata = storage::deployment_metadata(postgres_url, &request.deployment)?;
+        (metadata, Some(deployment_version))
+    } else {
+        (None, None)
+    };
+    Ok(RemoteDeployResponse {
+        deployment: request.deployment.clone(),
+        storage_deployment,
+        version: version.clone(),
+        bundle_dir: bundle_dir.display().to_string(),
+        latest_endpoint: format!("/subgraphs/{}/latest/gn", request.deployment),
+        version_endpoint: format!("/subgraphs/{}/{version}/gn", request.deployment),
+        sync,
+        metadata,
+        deployment_version,
+    })
+}
+
+fn verify_deploy_key(postgres_url: &str, key: &str) -> anyhow::Result<Option<DeployKeyActor>> {
+    if let Some(user) = storage::verify_api_key_scope(postgres_url, key, "deploy")? {
+        return Ok(Some(DeployKeyActor {
+            user: serde_json::to_value(user)?,
+            database_api_key: true,
+        }));
+    }
+    let bootstrap_key = std::env::var("UGRAPH_BOOTSTRAP_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if bootstrap_key.as_deref() == Some(key) {
+        return Ok(Some(DeployKeyActor {
+            user: json!({
+                "id": "bootstrap",
+                "email": "bootstrap@ugraph.local",
+                "role": "admin"
+            }),
+            database_api_key: false,
+        }));
+    }
+    Ok(None)
+}
+
+fn run_remote_sync(
+    postgres_url: &str,
+    storage_deployment: &str,
+    manifest_path: &Path,
+    build_dir: &Path,
+    request: &RemoteDeployRequest,
+) -> anyhow::Result<serde_json::Value> {
+    let bin = std::env::var("UGRAPH_NODE_BIN")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_exe().context("resolving current ugraph-node executable")?);
+    let mut command = Command::new(bin);
+    command
+        .arg("sync")
+        .arg("--manifest")
+        .arg(manifest_path)
+        .arg("--build-dir")
+        .arg(build_dir)
+        .arg("--storage")
+        .arg("postgres")
+        .arg("--postgres-url")
+        .arg(postgres_url)
+        .arg("--deployment")
+        .arg(storage_deployment)
+        .arg("--chain-id")
+        .arg(request.chain_id.to_string())
+        .arg("--limit")
+        .arg(request.limit.max(1).to_string())
+        .arg("--max-block-range")
+        .arg(request.max_block_range.max(1).to_string())
+        .arg("--rpc-retries")
+        .arg(request.rpc_retries.to_string())
+        .arg("--json");
+    let rpc_url = request
+        .rpc_url
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("UGRAPH_RPC_URL").ok())
+        .filter(|value| !value.trim().is_empty());
+    if let Some(rpc_url) = rpc_url {
+        command.arg("--rpc-url").arg(rpc_url);
+    }
+    if let Some(from_block) = request.from_block {
+        command.arg("--from-block").arg(from_block.to_string());
+    }
+    if let Some(to_block) = request.to_block {
+        command.arg("--to-block").arg(to_block.to_string());
+    }
+    if request.reset {
+        command.arg("--reset");
+    }
+    let output = command.output().context("running remote sync")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        anyhow::bail!(
+            "remote sync failed with status {}: {}{}",
+            output.status,
+            stdout,
+            stderr
+        );
+    }
+    serde_json::from_str::<serde_json::Value>(&stdout).or_else(|_| {
+        Ok(json!({
+            "stdout": stdout,
+            "stderr": stderr
+        }))
+    })
+}
+
+fn write_remote_bundle_file(root: &Path, file: &RemoteDeployFile) -> anyhow::Result<()> {
+    let relative = safe_relative_path(&file.path)?;
+    let destination = root.join(relative);
+    let bytes = hex::decode(&file.content_hex)
+        .with_context(|| format!("decoding hex content for {}", file.path))?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating bundle dir {}", parent.display()))?;
+    }
+    fs::write(&destination, bytes)
+        .with_context(|| format!("writing bundle file {}", destination.display()))
+}
+
+fn remote_bundle_dir(deployment: &str, version: &str) -> anyhow::Result<PathBuf> {
+    let base = std::env::var("UGRAPH_REMOTE_DEPLOY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/data/remote-deployments"));
+    Ok(base
+        .join(safe_name_component(deployment)?)
+        .join(safe_name_component(version)?))
+}
+
+fn safe_name_component(value: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("empty path component");
+    }
+    if value
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '@')))
+    {
+        anyhow::bail!("unsafe path component `{value}`");
+    }
+    Ok(value.to_string())
+}
+
+fn safe_relative_path(value: &str) -> anyhow::Result<PathBuf> {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        anyhow::bail!("absolute paths are not allowed in deploy bundles");
+    }
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => clean.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("unsafe deploy bundle path `{value}`")
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        anyhow::bail!("empty deploy bundle path");
+    }
+    Ok(clean)
+}
+
+fn default_remote_version() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format!("v{seconds}")
 }
 
 fn handle_graphql_get(
@@ -2008,5 +2435,17 @@ mod tests {
 
         let direct_headers = parse_headers(["x-api-key: direct_secret"].into_iter());
         assert_eq!(request_api_key(&direct_headers), Some("direct_secret"));
+    }
+
+    #[test]
+    fn remote_deploy_paths_reject_escape_attempts() {
+        assert!(safe_relative_path("../subgraph.yaml").is_err());
+        assert!(safe_relative_path("/tmp/subgraph.yaml").is_err());
+        assert_eq!(
+            safe_relative_path("./build/subgraph.yaml").unwrap(),
+            PathBuf::from("build/subgraph.yaml")
+        );
+        assert!(safe_name_component("growfi@4.0.4").is_ok());
+        assert!(safe_name_component("growfi/4.0.4").is_err());
     }
 }

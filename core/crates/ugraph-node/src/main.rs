@@ -588,10 +588,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
     }
 
     let mut last_executed_block = None;
-    loop {
-        let Some(log) = next_unprocessed_log(&pending_logs, &processed_logs) else {
-            break;
-        };
+    while let Some(log) = next_unprocessed_log(&pending_logs, &processed_logs) {
         if input.limit == 0
             || (executions.len() >= input.limit && log.block_number != last_executed_block)
         {

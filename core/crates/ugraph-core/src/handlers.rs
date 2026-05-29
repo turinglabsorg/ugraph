@@ -151,7 +151,7 @@ mod tests {
             "../../examples/growfi/build",
         )?;
         assert!(report.ok, "missing handlers: {:?}", report.missing_handlers);
-        assert_eq!(report.handlers.len(), 76);
+        assert_eq!(report.handlers.len(), 77);
         Ok(())
     }
 }

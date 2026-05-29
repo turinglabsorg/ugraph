@@ -94,6 +94,29 @@ https://<domain>/status
 https://<domain>/healthz
 ```
 
+Authenticated remote deploys are served by the same API process:
+
+```bash
+ugraph auth login \
+  --endpoint https://<domain> \
+  --api-key <ugraph-api-key>
+
+ugraph deploy --provider remote \
+  --deployment growfi \
+  --version 4.0.4 \
+  --visibility public \
+  --chain-id 11155111 \
+  --manifest path/to/subgraph.yaml \
+  --rpc-url <rpc>
+```
+
+The uploaded bundle is persisted in the `ugraph-data` Docker volume under
+`/data/remote-deployments`. Remote deploys run a bounded server-side sync and
+promote the requested version to the `latest` query alias when sync succeeds.
+The deploy script creates or reuses `UGRAPH_BOOTSTRAP_API_KEY` in
+`/opt/ugraph/.env` and prints the matching `ugraph auth login ...` command at
+the end of each deploy.
+
 ## Users and API keys
 
 The e2-micro target does not expose Postgres publicly. Run control-plane CLI

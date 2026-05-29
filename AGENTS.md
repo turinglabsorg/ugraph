@@ -154,6 +154,16 @@
   API key prefix used for the deploy. API keys with `deploy` scope can create
   or update deploy metadata; private GraphQL deployments require a key with
   `query` scope.
+- The hosted control-plane path starts with `ugraph auth login --endpoint <url>
+  --api-key <key>`, which writes `~/.ugraph/config.json`. `ugraph deploy
+  --provider remote` uploads a compiled subgraph bundle to `POST
+  /api/deployments`; the API authenticates `deploy` scope, writes the bundle
+  under `UGRAPH_REMOTE_DEPLOY_DIR`, runs a bounded server-side `ugraph-node
+  sync` into `<deployment>@<version>`, records deployment metadata, and promotes
+  the version to `/subgraphs/<deployment>/latest/gn` on success. The e2-micro
+  deploy script generates or reuses `UGRAPH_BOOTSTRAP_API_KEY` so a fresh
+  hosted instance can accept remote deploys before database-backed API keys
+  exist.
 - `core deployments` lists deployment ownership/version metadata, can register
   or update the current version label without running a sync, and can change a
   deployment's query visibility. Deployment ids are unique Postgres primary

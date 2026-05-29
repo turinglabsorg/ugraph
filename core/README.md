@@ -81,6 +81,7 @@ UGRAPH_RPC_TIMEOUT_SECS=15
 UGRAPH_DEPLOY_MAX_PASSES=8
 UGRAPH_SYNC_LIMIT=1000
 UGRAPH_API_KEY=
+UGRAPH_BOOTSTRAP_API_KEY=
 UGRAPH_IPFS_GATEWAY=https://ipfs.io/ipfs/
 UGRAPH_IPFS_TIMEOUT_SECS=60
 UGRAPH_MAX_IPFS_FILE_BYTES=26214400
@@ -133,6 +134,10 @@ not include the user/operator `ugraph` CLI from `cli/`:
 - `UGRAPH_API_KEY` authenticates CLI operations that record deployment
   ownership and can also be sent to private query endpoints with
   `Authorization: Bearer <key>` or `x-api-key`.
+- `UGRAPH_BOOTSTRAP_API_KEY` is an optional server-side deploy key accepted by
+  the hosted API before database-backed users have been created. It grants only
+  remote deploy access; database API keys remain the preferred long-term key
+  source.
 
 `docker-compose.yml` starts Postgres, a shared `chain-reader`, a feed-backed
 indexer worker, and the API locally. The API reloads the selected store on each
@@ -194,6 +199,35 @@ ugraph deploy --provider local \
   --version v1 \
   --visibility public
 ```
+
+For hosted deployments, save the endpoint and key once:
+
+```bash
+ugraph auth login \
+  --endpoint https://ugraph.example.com \
+  --api-key <ugraph-api-key>
+
+ugraph auth whoami
+```
+
+Then deploy a compiled subgraph bundle remotely:
+
+```bash
+ugraph deploy --provider remote \
+  --manifest subgraph.yaml \
+  --deployment growfi \
+  --version 4.0.4 \
+  --visibility public \
+  --chain-id 11155111 \
+  --rpc-url <rpc>
+```
+
+The remote deploy command sends `subgraph.yaml`, referenced local files, and the
+compiled `build/` directory to `/api/deployments`, authenticated with a key that
+has `deploy` scope. The server writes the bundle under
+`UGRAPH_REMOTE_DEPLOY_DIR`, runs `ugraph-node sync` against a physical storage
+deployment named `<deployment>@<version>`, records deployment metadata, and
+promotes the version so `/subgraphs/<deployment>/latest/gn` points at it.
 
 `users signup enable|disable|status` controls whether public user creation is
 allowed by future HTTP control-plane endpoints. The current default is
