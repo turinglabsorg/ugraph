@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="UGraph is a portable Graph-compatible subgraph runtime with hosted deploys, versioned GraphQL endpoints, and public or private query access.">
+    <meta property="og:title" content="UGraph">
+    <meta property="og:description" content="A portable subgraph runtime for teams that need control over indexing, deploys, and GraphQL access.">
+    <meta property="og:type" content="website">
+    <meta name="theme-color" content="#050505">
+    <title>UGraph - portable subgraph runtime</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <section class="shell hero" aria-labelledby="hero-title">
+        <div class="topbar">
+          <span>subgraph runtime // hosted deploys // graph-compatible indexing</span>
+          <a class="maker" href="https://turinglabs.org" rel="noopener">made by turinglabs_</a>
+        </div>
+
+        <header class="hero-grid">
+          <div class="mark" aria-label="UGraph logo">UG</div>
+          <div class="hero-copy">
+            <p class="eyebrow">Self-hosted indexing infrastructure</p>
+            <h1 id="hero-title">UGraph</h1>
+            <p class="subtitle">
+              A portable Graph-compatible runtime for teams that want to deploy
+              subgraphs, index chain data, and expose versioned GraphQL endpoints
+              without handing the control plane to a hosted vendor.
+            </p>
+            <nav class="actions" aria-label="Primary links">
+              <a class="button primary" href="https://github.com/turinglabsorg/ugraph" rel="noopener">Repository</a>
+              <a class="button" href="#deploy">Deploy flow</a>
+              <a class="button" href="#architecture">Architecture</a>
+            </nav>
+          </div>
+          <aside class="console" aria-label="UGraph status preview">
+            <div class="console-head">
+              <span>status</span>
+              <strong>OPERATIONAL</strong>
+            </div>
+            <dl class="metrics">
+              <div>
+                <dt>Block</dt>
+                <dd>10866837</dd>
+              </div>
+              <div>
+                <dt>Entities</dt>
+                <dd>1842</dd>
+              </div>
+              <div>
+                <dt>Changes</dt>
+                <dd>416</dd>
+              </div>
+              <div>
+                <dt>Errors</dt>
+                <dd>0</dd>
+              </div>
+            </dl>
+            <ul class="terminal">
+              <li><span>$ endpoint</span><code>/subgraphs/growfi/latest/gn</code></li>
+              <li><span>$ visibility</span><code>public | private</code></li>
+              <li><span>$ auth</span><code>owner mode</code></li>
+              <li><span>$ refresh</span><code>10 seconds</code></li>
+            </ul>
+          </aside>
+        </header>
+      </section>
+
+      <section class="shell strip" aria-label="Runtime capabilities">
+        <div class="metric-block">
+          <span class="label">01</span>
+          <strong>Standard subgraph bundles</strong>
+          <p>Manifest, schema, ABIs, templates, and compiled AssemblyScript mappings stay in the familiar Graph Protocol shape.</p>
+        </div>
+        <div class="metric-block">
+          <span class="label">02</span>
+          <strong>Versioned hosted endpoints</strong>
+          <p>Deploy a version, sync it into isolated storage, then promote it behind a stable latest alias.</p>
+        </div>
+        <div class="metric-block">
+          <span class="label">03</span>
+          <strong>Instance-level access policy</strong>
+          <p>Run a private owner-controlled instance or a public instance where approved users can publish.</p>
+        </div>
+      </section>
+
+      <section id="architecture" class="shell section-grid" aria-labelledby="architecture-title">
+        <div class="section-title">
+          <p class="eyebrow">Architecture</p>
+          <h2 id="architecture-title">One feed, many deployments.</h2>
+        </div>
+        <div class="flow" aria-label="UGraph architecture flow">
+          <div class="node">
+            <span>01</span>
+            <strong>chain-reader</strong>
+            <p>Reads blocks and logs for each chain ID.</p>
+          </div>
+          <div class="arrow" aria-hidden="true">-></div>
+          <div class="node">
+            <span>02</span>
+            <strong>raw feed</strong>
+            <p>Stores shared chain data in Postgres.</p>
+          </div>
+          <div class="arrow" aria-hidden="true">-></div>
+          <div class="node">
+            <span>03</span>
+            <strong>sync worker</strong>
+            <p>Executes mappings and persists isolated entity state.</p>
+          </div>
+          <div class="arrow" aria-hidden="true">-></div>
+          <div class="node">
+            <span>04</span>
+            <strong>GraphQL</strong>
+            <p>Serves GraphiQL, public endpoints, and private API-key queries.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="deploy" class="shell deploy" aria-labelledby="deploy-title">
+        <div class="section-title">
+          <p class="eyebrow">CLI</p>
+          <h2 id="deploy-title">Remote deploys from your terminal.</h2>
+          <p>
+            Hosted instances accept authenticated bundle uploads and expose
+            Graph Node-style paths for each promoted version.
+          </p>
+        </div>
+        <pre aria-label="Remote deploy command"><code>ugraph auth login \
+  --endpoint https://ugraph.example.com \
+  --api-key $UGRAPH_API_KEY
+
+ugraph deploy \
+  --provider remote \
+  --deployment growfi \
+  --version 4.0.4 \
+  --visibility public \
+  --chain-id 11155111 \
+  --manifest subgraph.yaml \
+  --rpc-url $SEPOLIA_RPC_URL</code></pre>
+      </section>
+
+      <section class="shell matrix" aria-labelledby="matrix-title">
+        <div class="section-title">
+          <p class="eyebrow">Why it exists</p>
+          <h2 id="matrix-title">Portable indexing with real operator controls.</h2>
+        </div>
+        <div class="matrix-grid">
+          <article>
+            <span class="label">compatibility</span>
+            <h3>Graph-shaped inputs</h3>
+            <p>UGraph targets the standard subgraph developer workflow while keeping runtime behavior testable through fixture matrices.</p>
+          </article>
+          <article>
+            <span class="label">control</span>
+            <h3>Private or public instances</h3>
+            <p>Deployment ownership, API-key scopes, and query visibility are configured per instance, not hardcoded into a single SaaS model.</p>
+          </article>
+          <article>
+            <span class="label">operations</span>
+            <h3>Status-first runtime</h3>
+            <p>The public status surface shows checkpoints, entity deltas, GraphiQL, health, and Prometheus metrics from the same node.</p>
+          </article>
+          <article>
+            <span class="label">versions</span>
+            <h3>Promote when ready</h3>
+            <p>New versions sync into their own storage deployment before the latest alias moves, keeping old endpoints queryable.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
