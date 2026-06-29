@@ -120,12 +120,13 @@
   are normal HTTP aborts, not indexing or GraphQL execution failures.
 - Keep provider wiring out of the core runtime. DigitalOcean is a likely target,
   but the core container should stay portable.
-- Lowest-cost deploy target is now `infra/gcp/e2-micro`: one Google Compute
-  Engine `e2-micro` VM in an Always Free eligible region, local Docker Compose,
-  local Postgres, and direct Docker image upload with no Cloud SQL, Cloud Run,
-  or Artifact Registry dependency. Default profile is compact
-  (`postgres` + direct-RPC `indexer` + `api`); the shared feed profile can be
-  enabled later with `COMPOSE_PROFILES=feed` and
+- GrowFi deploy target is now `infra/gcp/e2-micro`: one Google Compute
+  Engine `e2-medium` VM, local Docker Compose, local Postgres, and direct
+  Docker image upload with no Cloud SQL, Cloud Run, or Artifact Registry
+  dependency. The VM must run mainnet and Sepolia APIs/indexers concurrently;
+  do not pause one environment's indexer to recover the other. Default profile
+  is compact (`postgres` + direct-RPC `indexer` + `api`); the shared feed
+  profile can be enabled later with `COMPOSE_PROFILES=feed` and
   `UGRAPH_LOG_SOURCE=postgres-feed`. Security default: Caddy terminates HTTPS
   on `ugraph.growfi.dev` when `DO_DNS_ZONE=growfi.dev` is set, or
   `<external-ip>.sslip.io` otherwise. The VM uses a dedicated `ugraph-net` VPC,

@@ -1,8 +1,8 @@
-# Google Compute Engine e2-micro
+# Google Compute Engine e2
 
-This target runs `ugraph` on the cheapest Google Cloud shape that can host the
-runtime continuously: one Compute Engine `e2-micro` VM in an Always Free
-eligible US region.
+This target runs `ugraph` on one Google Compute Engine VM with local Docker
+Compose. GrowFi uses `e2-medium` so mainnet and Sepolia APIs/indexers can run
+at the same time.
 
 It intentionally avoids Cloud Run, Cloud SQL, and Artifact Registry for the
 first deployment path:
@@ -29,8 +29,8 @@ COMPOSE_PROFILES=feed
 UGRAPH_LOG_SOURCE=postgres-feed
 ```
 
-On `e2-micro`, keep the default compact profile unless you are explicitly
-stress-testing the feed worker.
+Do not pause one GrowFi environment's indexer to recover the other. Resize or
+split infrastructure if mainnet and Sepolia cannot run together.
 
 ## Deploy
 
@@ -51,7 +51,7 @@ The script creates or reuses:
 - VPC `ugraph-net` and a regional `/24` subnet;
 - firewall rule for public ports `80` and `443`;
 - firewall rule for SSH restricted to the deploy operator IP;
-- VM `ugraph-e2-micro`;
+- VM `ugraph-e2-micro` using `e2-medium` by default;
 - `/opt/ugraph/docker-compose.yml`;
 - `/opt/ugraph/Caddyfile`;
 - `/opt/ugraph/.env`;
@@ -123,7 +123,7 @@ deploy-scoped key may publish.
 
 ## Users and API keys
 
-The e2-micro target does not expose Postgres publicly. Run control-plane CLI
+The GCP VM target does not expose Postgres publicly. Run control-plane CLI
 commands on the VM, over an SSH tunnel, or from a trusted host that can reach
 the database. The schema supports:
 

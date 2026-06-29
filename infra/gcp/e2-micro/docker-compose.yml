@@ -14,7 +14,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
-    mem_limit: 64m
+    mem_limit: 128m
 
   postgres:
     image: postgres:16-alpine
@@ -45,7 +45,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-    mem_limit: 192m
+    mem_limit: 512m
 
   api:
     image: ${UGRAPH_IMAGE:?UGRAPH_IMAGE is required}
@@ -80,7 +80,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-    mem_limit: 384m
+    mem_limit: 512m
 
   indexer:
     image: ${UGRAPH_IMAGE:?UGRAPH_IMAGE is required}
@@ -111,7 +111,7 @@ services:
       UGRAPH_IPFS_GATEWAY: ${UGRAPH_IPFS_GATEWAY:-https://ipfs.io/ipfs/}
       UGRAPH_IPFS_TIMEOUT_SECS: ${UGRAPH_IPFS_TIMEOUT_SECS:-60}
       UGRAPH_MAX_IPFS_FILE_BYTES: ${UGRAPH_MAX_IPFS_FILE_BYTES:-26214400}
-    mem_limit: 256m
+    mem_limit: 768m
 
   chain-reader:
     image: ${UGRAPH_IMAGE:?UGRAPH_IMAGE is required}
@@ -135,7 +135,7 @@ services:
       UGRAPH_MAX_BLOCK_RANGE: ${UGRAPH_MAX_BLOCK_RANGE:-500}
       UGRAPH_RPC_RETRIES: ${UGRAPH_RPC_RETRIES:-3}
       UGRAPH_RPC_TIMEOUT_SECS: ${UGRAPH_RPC_TIMEOUT_SECS:-15}
-    mem_limit: 192m
+    mem_limit: 512m
 
 volumes:
   caddy-data:

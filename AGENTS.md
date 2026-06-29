@@ -272,8 +272,8 @@
 ## Deployment Direction
 
 - Build container-first. A single Docker image should run locally and deploy cleanly to any container host.
-- Lowest-cost deployment target is Google Compute Engine `e2-micro` under
-  `infra/gcp/e2-micro`: one Always Free eligible VM, local Docker Compose,
+- Current GrowFi deployment target is Google Compute Engine `e2-medium` under
+  `infra/gcp/e2-micro`: one VM, local Docker Compose,
   local Postgres, direct image upload, and no Cloud SQL, Cloud Run, or Artifact
   Registry dependency. The secure default is Caddy HTTPS on a custom domain or
   `<external-ip>.sslip.io`; use `UGRAPH_DOMAIN=ugraph.growfi.dev` and
@@ -282,7 +282,10 @@
   Firewall only exposes `80/443` publicly; SSH is restricted to the deploy
   operator IP. No public Postgres port, no public direct API port, generated DB
   password in `/opt/ugraph/.env` with `0600`, unattended security updates, and
-  a 2 GiB swapfile for e2-micro stability.
+  a 2 GiB swapfile for boot stability.
+- GrowFi mainnet and Sepolia deployments must remain separate and both indexers
+  must stay active. Do not pause one environment's indexer to recover the other;
+  resize or split infrastructure instead.
 - Keep DigitalOcean compatible, but do not default to App Platform or managed
   databases when the goal is strict cost containment.
 - Keep `core` runnable without cloud services for local compatibility tests.

@@ -73,9 +73,11 @@ docker build -f core/Dockerfile -t ugraph-core:local .
 
 ## Infra
 
-`infra/` owns online deployment wiring. The lowest-cost target is currently
-`infra/gcp/e2-micro`: one Google Compute Engine `e2-micro` VM, local Docker
+`infra/` owns online deployment wiring. The GrowFi target is currently
+`infra/gcp/e2-micro`: one Google Compute Engine `e2-medium` VM, local Docker
 Compose, local Postgres, and direct image upload without Cloud SQL, Cloud Run,
-or Artifact Registry. The public edge is Caddy HTTPS on either a custom domain
-such as `ugraph.growfi.dev` or the generated `<external-ip>.sslip.io` hostname;
-the API and Postgres stay internal to the Docker network.
+or Artifact Registry. The VM size must be kept large enough for mainnet and
+Sepolia APIs/indexers to run at the same time. The public edge is Caddy HTTPS
+on either a custom domain such as `ugraph.growfi.dev` or the generated
+`<external-ip>.sslip.io` hostname; the API and Postgres stay internal to the
+Docker network.
