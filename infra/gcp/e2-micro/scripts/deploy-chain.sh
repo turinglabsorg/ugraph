@@ -40,6 +40,8 @@ export UGRAPH_TO_BLOCK="${UGRAPH_TO_BLOCK:-$(yaml_value to_block)}"
 export UGRAPH_LOG_SOURCE="${UGRAPH_LOG_SOURCE:-$(yaml_value log_source)}"
 export UGRAPH_POLL_INTERVAL_MS="${UGRAPH_POLL_INTERVAL_MS:-$(yaml_value poll_interval_ms)}"
 export UGRAPH_MAX_BLOCK_RANGE="${UGRAPH_MAX_BLOCK_RANGE:-$(yaml_value max_block_range)}"
+export UGRAPH_RPC_MIN_INTERVAL_MS="${UGRAPH_RPC_MIN_INTERVAL_MS:-$(yaml_value rpc_min_interval_ms)}"
+export UGRAPH_SYNC_MAX_BLOCKS_PER_PASS="${UGRAPH_SYNC_MAX_BLOCKS_PER_PASS:-$(yaml_value sync_max_blocks_per_pass)}"
 export UGRAPH_SYNC_LIMIT="${UGRAPH_SYNC_LIMIT:-$(yaml_value sync_limit)}"
 
 exec "${SCRIPT_DIR}/deploy.sh"

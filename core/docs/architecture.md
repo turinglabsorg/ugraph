@@ -190,11 +190,18 @@ status page for operators and smoke checks.
 
 Log scanning chunks `eth_getLogs` requests with `UGRAPH_MAX_BLOCK_RANGE`.
 Individual RPC, Chainlist registry, and mapping `ethereum.call` requests are
-bounded by `UGRAPH_RPC_TIMEOUT_SECS`. Transient HTTP/RPC failures are retried
-with `UGRAPH_RPC_RETRIES`; provider range-limit failures are split recursively
-into smaller ranges. Initial static source scanning tries resolved RPC URLs in
-order, so a bad public endpoint can fall through to the next Chainlist URL or
-explicit configured URL.
+bounded by `UGRAPH_RPC_TIMEOUT_SECS`. JSON-RPC calls can be paced with
+`UGRAPH_RPC_MIN_INTERVAL_MS`, which applies to log scans, block metadata, and
+mapping Ethereum calls in the same process. Transient HTTP/RPC failures are
+retried with `UGRAPH_RPC_RETRIES`; provider range-limit failures are split
+recursively into smaller ranges. Initial static source scanning tries resolved
+RPC URLs in order, so a bad public endpoint can fall through to the next
+Chainlist URL or explicit configured URL.
+
+`sync --watch` bounds each automatic catch-up pass with
+`UGRAPH_SYNC_MAX_BLOCKS_PER_PASS` when no explicit `to_block` is set. This
+keeps large catch-ups durable by writing checkpoints after each bounded window
+instead of waiting until the indexer reaches the chain head.
 
 ## Live Smoke
 

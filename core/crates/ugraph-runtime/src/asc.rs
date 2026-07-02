@@ -6,9 +6,9 @@ use std::{
 
 use num_bigint::{BigInt, BigUint, Sign};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use tiny_keccak::{Hasher, Keccak};
-use ugraph_core::{DecodedEventParam, DecodedValue, MatchedLog};
+use ugraph_core::{throttle_rpc_request, DecodedEventParam, DecodedValue, MatchedLog};
 use wasmtime::{Caller, Extern, Instance, Memory, Store, TypedFunc, Val, ValType};
 
 use crate::RuntimeHostState;
@@ -427,10 +427,10 @@ pub(crate) fn handle_host_call(
         }
         "ethereum.call" => {
             let call = read_smart_contract_call_from_caller(&mut caller, i32_param(params, 0)?)?;
-            let rpc_url = caller.data().rpc_url.clone();
+            let rpc_urls = caller.data().rpc_urls.clone();
             let block_number = caller.data().block_number;
             let (values, report) = execute_ethereum_call(
-                rpc_url.as_deref(),
+                &rpc_urls,
                 block_number,
                 &call,
                 &mut caller.data_mut().ethereum_call_cache,
@@ -615,12 +615,14 @@ pub(crate) fn handle_host_call(
                 .transpose()?
                 .map(|bytes| format!("0x{}", hex::encode(bytes)))
                 .unwrap_or_default();
-            let has_code = match caller.data().rpc_url.as_deref() {
-                Some(rpc_url) if !address.is_empty() => {
-                    eth_get_code(rpc_url, &address, caller.data().block_number)
-                        .map(|code| code != "0x" && code != "0x0")
-                        .unwrap_or(false)
-                }
+            let has_code = match (!caller.data().rpc_urls.is_empty(), address.is_empty()) {
+                (true, false) => eth_get_code_with_fallback(
+                    &caller.data().rpc_urls,
+                    &address,
+                    caller.data().block_number,
+                )
+                .map(|code| code != "0x" && code != "0x0")
+                .unwrap_or(false),
                 _ => false,
             };
             set_i32_result(results, 0, i32::from(has_code));
@@ -1787,7 +1789,7 @@ fn pow10(scale: usize) -> Result<BigInt, wasmtime::Error> {
 }
 
 fn execute_ethereum_call(
-    rpc_url: Option<&str>,
+    rpc_urls: &[String],
     block_number: Option<u64>,
     call: &SmartContractCall,
     cache: &mut EthereumCallCache,
@@ -1804,11 +1806,11 @@ fn execute_ethereum_call(
         error: None,
     };
 
-    let Some(rpc_url) = rpc_url else {
+    if rpc_urls.is_empty() {
         report.reverted = true;
         report.error = Some("RPC URL not configured".to_string());
         return Ok((None, report));
-    };
+    }
     let (selector_signature, input_types) = parse_call_input_signature(&call.function_signature)?;
     if input_types.len() != call.function_params.len() {
         report.reverted = true;
@@ -1823,12 +1825,13 @@ fn execute_ethereum_call(
     let block = block_number
         .map(|block| format!("0x{block:x}"))
         .unwrap_or_else(|| "latest".to_string());
-    let cache_key = format!("{rpc_url}|{}|{calldata}|{block}", call.contract_address);
+    let cache_key = format!("{}|{calldata}|{block}", call.contract_address);
     let response = match cache.get(&cache_key) {
         Some(result) => Ok(result.clone()),
-        None => eth_call(rpc_url, &call.contract_address, &calldata, &block).inspect(|result| {
-            cache.insert(cache_key, result.clone());
-        }),
+        None => eth_call_with_fallback(rpc_urls, &call.contract_address, &calldata, &block)
+            .inspect(|result| {
+                cache.insert(cache_key, result.clone());
+            }),
     };
     let result = match response {
         Ok(result) => result,
@@ -1848,6 +1851,22 @@ fn execute_ethereum_call(
     }
 }
 
+fn eth_call_with_fallback(
+    rpc_urls: &[String],
+    to: &str,
+    data: &str,
+    block: &str,
+) -> Result<String, String> {
+    let mut last_error = None;
+    for rpc_url in rpc_urls {
+        match eth_call(rpc_url, to, data, block) {
+            Ok(result) => return Ok(result),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "no RPC URLs configured".to_string()))
+}
+
 fn eth_call(rpc_url: &str, to: &str, data: &str, block: &str) -> Result<String, String> {
     let body = json!({
         "jsonrpc": "2.0",
@@ -1861,23 +1880,23 @@ fn eth_call(rpc_url: &str, to: &str, data: &str, block: &str) -> Result<String, 
             block,
         ],
     });
-    let response = HTTP_CLIENT
-        .get_or_init(reqwest::blocking::Client::new)
-        .post(rpc_url)
-        .timeout(rpc_timeout())
-        .json(&body)
-        .send()
-        .map_err(|err| err.to_string())?
-        .error_for_status()
-        .map_err(|err| err.to_string())?
-        .json::<JsonRpcResponse<String>>()
-        .map_err(|err| err.to_string())?;
-    if let Some(error) = response.error {
-        return Err(format!("rpc error {}: {}", error.code, error.message));
+    throttle_rpc_request();
+    rpc_post(rpc_url, body)
+}
+
+fn eth_get_code_with_fallback(
+    rpc_urls: &[String],
+    address: &str,
+    block_number: Option<u64>,
+) -> Result<String, String> {
+    let mut last_error = None;
+    for rpc_url in rpc_urls {
+        match eth_get_code(rpc_url, address, block_number) {
+            Ok(result) => return Ok(result),
+            Err(error) => last_error = Some(error),
+        }
     }
-    response
-        .result
-        .ok_or_else(|| "rpc response did not include a result".to_string())
+    Err(last_error.unwrap_or_else(|| "no RPC URLs configured".to_string()))
 }
 
 fn eth_get_code(rpc_url: &str, address: &str, block_number: Option<u64>) -> Result<String, String> {
@@ -1890,23 +1909,81 @@ fn eth_get_code(rpc_url: &str, address: &str, block_number: Option<u64>) -> Resu
         "method": "eth_getCode",
         "params": [address, block],
     });
+    throttle_rpc_request();
+    rpc_post(rpc_url, body)
+}
+
+fn rpc_post(rpc_url: &str, body: JsonValue) -> Result<String, String> {
     let response = HTTP_CLIENT
         .get_or_init(reqwest::blocking::Client::new)
         .post(rpc_url)
         .timeout(rpc_timeout())
         .json(&body)
         .send()
-        .map_err(|err| err.to_string())?
-        .error_for_status()
-        .map_err(|err| err.to_string())?
-        .json::<JsonRpcResponse<String>>()
-        .map_err(|err| err.to_string())?;
+        .map_err(rpc_request_error_summary)?;
+    let status = response.status();
+    let response_text = response.text().map_err(rpc_request_error_summary)?;
+    if !status.is_success() {
+        return Err(rpc_http_status_error(
+            status.as_u16(),
+            &response_text,
+            rpc_url,
+        ));
+    }
+    let response = serde_json::from_str::<JsonRpcResponse<String>>(&response_text)
+        .map_err(|_| "failed to parse rpc response".to_string())?;
     if let Some(error) = response.error {
-        return Err(format!("rpc error {}: {}", error.code, error.message));
+        return Err(format!(
+            "rpc error {}: {}",
+            error.code,
+            redact_rpc_url(&error.message, rpc_url)
+        ));
     }
     response
         .result
         .ok_or_else(|| "rpc response did not include a result".to_string())
+}
+
+fn rpc_http_status_error(status: u16, response_text: &str, rpc_url: &str) -> String {
+    if let Ok(response) = serde_json::from_str::<JsonRpcResponse<JsonValue>>(response_text) {
+        if let Some(error) = response.error {
+            return format!(
+                "rpc error {}: {}",
+                error.code,
+                redact_rpc_url(&error.message, rpc_url)
+            );
+        }
+    }
+    let summary = response_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let summary = if summary.is_empty() {
+        "empty response body".to_string()
+    } else {
+        summary.chars().take(240).collect()
+    };
+    format!(
+        "rpc returned HTTP status {status}: {}",
+        redact_rpc_url(&summary, rpc_url)
+    )
+}
+
+fn rpc_request_error_summary(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "rpc request timed out".to_string()
+    } else if error.is_connect() {
+        "rpc connection failed".to_string()
+    } else {
+        "rpc request failed".to_string()
+    }
+}
+
+fn redact_rpc_url(message: &str, rpc_url: &str) -> String {
+    if rpc_url.is_empty() {
+        return message.to_string();
+    }
+    message.replace(rpc_url, "<rpc-url>")
 }
 
 fn fetch_ipfs_bytes(path: &str) -> Result<Option<Vec<u8>>, wasmtime::Error> {

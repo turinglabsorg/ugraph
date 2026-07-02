@@ -25,8 +25,8 @@ pub use plan::{
     SourcePlan,
 };
 pub use rpc::{
-    default_env_rpc_url, resolve_rpc_urls, rpc_urls_from_chainlist_json, ChainRegistryEntry,
-    RpcResolution, RpcResolverError, RpcResolverOptions,
+    default_env_rpc_url, resolve_rpc_urls, rpc_min_interval, rpc_urls_from_chainlist_json,
+    throttle_rpc_request, ChainRegistryEntry, RpcResolution, RpcResolverError, RpcResolverOptions,
 };
 pub use scan::{
     latest_block_number, parse_rpc_u64, scan_planned_source, scan_raw_logs, scan_static_sources,

@@ -3,11 +3,12 @@ domain: ugraph.growfi.dev
 dns_zone: growfi.dev
 chain_id: 11155111
 block_explorer_url: https://sepolia.etherscan.io/block/{block}
-rpc_url: https://sepolia.drpc.org
+rpc_url:
 subgraph_manifest: /app/examples/growfi/subgraph.yaml
 from_block: 10838711
 to_block:
 log_source: rpc
 poll_interval_ms: 12000
 max_block_range: 500
+rpc_min_interval_ms: 0
 sync_limit: 500

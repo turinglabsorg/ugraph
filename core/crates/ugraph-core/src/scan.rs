@@ -6,7 +6,8 @@ use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
 
 use crate::{
-    build_indexing_plan, decode_event_params, DecodeError, DecodedEventParam, PlanError, SourcePlan,
+    build_indexing_plan, decode_event_params, rpc::throttle_rpc_request, DecodeError,
+    DecodedEventParam, PlanError, SourcePlan,
 };
 
 const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;
@@ -15,12 +16,16 @@ const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;
 pub enum ScanError {
     #[error(transparent)]
     Plan(#[from] PlanError),
-    #[error("rpc request failed: {0}")]
+    #[error("rpc request failed")]
     Http(#[from] reqwest::Error),
+    #[error("rpc returned HTTP status {status}: {message}")]
+    HttpStatus { status: u16, message: String },
     #[error("rpc returned error {code}: {message}")]
     Rpc { code: i64, message: String },
     #[error("rpc response did not include a result")]
     MissingResult,
+    #[error("failed to parse rpc response: {0}")]
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Decode(#[from] DecodeError),
 }
@@ -332,6 +337,11 @@ fn eth_get_logs_resilient(
     topic0s: &[String],
     rpc_retries: u32,
 ) -> Result<Vec<RawEthereumLog>, ScanError> {
+    let attempts = if from_block < to_block {
+        1
+    } else {
+        rpc_retries
+    };
     match rpc_with_retries(
         client,
         rpc_url,
@@ -342,10 +352,21 @@ fn eth_get_logs_resilient(
             "toBlock": block_hex(to_block),
             "topics": [topic0s],
         }]),
-        rpc_retries,
+        attempts,
     ) {
         Ok(logs) => Ok(logs),
         Err(error) if from_block < to_block && should_split_get_logs_error(&error) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "get_logs_split",
+                    "address": address,
+                    "fromBlock": from_block,
+                    "toBlock": to_block,
+                    "error": scan_error_summary(&error, rpc_url)
+                })
+            );
             let mid = from_block + (to_block - from_block) / 2;
             let mut left = eth_get_logs_resilient(
                 client,
@@ -417,16 +438,22 @@ fn rpc_once<T: for<'de> Deserialize<'de>>(
         "method": method,
         "params": params,
     });
-    let response = client
-        .post(rpc_url)
-        .json(&body)
-        .send()?
-        .error_for_status()?
-        .json::<JsonRpcResponse<T>>()?;
+    throttle_rpc_request();
+    let response = client.post(rpc_url).json(&body).send()?;
+    let status = response.status();
+    let response_text = response.text()?;
+    if !status.is_success() {
+        return Err(rpc_http_status_error(
+            status.as_u16(),
+            &response_text,
+            rpc_url,
+        ));
+    }
+    let response = serde_json::from_str::<JsonRpcResponse<T>>(&response_text)?;
     if let Some(error) = response.error {
         return Err(ScanError::Rpc {
             code: error.code,
-            message: error.message,
+            message: redact_rpc_url(&error.message, rpc_url),
         });
     }
     response.result.ok_or(ScanError::MissingResult)
@@ -450,25 +477,85 @@ fn rpc_timeout() -> Duration {
 
 fn retryable_rpc_error(error: &ScanError) -> bool {
     match error {
-        ScanError::Http(_) | ScanError::MissingResult => true,
+        ScanError::Http(error) => error.is_timeout() || error.is_connect(),
+        ScanError::HttpStatus { status, .. } => *status == 429 || *status >= 500,
+        ScanError::MissingResult => true,
         ScanError::Rpc { code, .. } => matches!(*code, -32005 | -32002 | -32603 | 429),
-        ScanError::Plan(_) | ScanError::Decode(_) => false,
+        ScanError::Plan(_) | ScanError::Decode(_) | ScanError::Json(_) => false,
     }
 }
 
 fn should_split_get_logs_error(error: &ScanError) -> bool {
     match error {
-        ScanError::Rpc { message, .. } => {
-            let message = message.to_ascii_lowercase();
-            message.contains("range")
-                || message.contains("too many")
-                || message.contains("more than")
-                || message.contains("limit")
-                || message.contains("timeout")
+        ScanError::Rpc { message, .. } => message_indicates_log_range_limit(message),
+        ScanError::HttpStatus { status, message } => {
+            *status == 413 || message_indicates_log_range_limit(message)
         }
-        ScanError::Http(_) | ScanError::MissingResult => true,
-        ScanError::Plan(_) | ScanError::Decode(_) => false,
+        ScanError::Http(error) => error.is_timeout(),
+        ScanError::MissingResult => true,
+        ScanError::Plan(_) | ScanError::Decode(_) | ScanError::Json(_) => false,
     }
+}
+
+fn rpc_http_status_error(status: u16, response_text: &str, rpc_url: &str) -> ScanError {
+    if let Ok(response) = serde_json::from_str::<JsonRpcResponse<JsonValue>>(response_text) {
+        if let Some(error) = response.error {
+            return ScanError::Rpc {
+                code: error.code,
+                message: redact_rpc_url(&error.message, rpc_url),
+            };
+        }
+    }
+
+    ScanError::HttpStatus {
+        status,
+        message: summarize_http_response(response_text, rpc_url),
+    }
+}
+
+fn scan_error_summary(error: &ScanError, rpc_url: &str) -> String {
+    match error {
+        ScanError::Http(error) if error.is_timeout() => "rpc request timed out".to_string(),
+        ScanError::Http(error) if error.is_connect() => "rpc connection failed".to_string(),
+        ScanError::Http(_) => "rpc request failed".to_string(),
+        ScanError::HttpStatus { status, message } => {
+            format!("http status {status}: {}", redact_rpc_url(message, rpc_url))
+        }
+        ScanError::Rpc { code, message } => {
+            format!("rpc error {code}: {}", redact_rpc_url(message, rpc_url))
+        }
+        ScanError::MissingResult => "rpc response did not include a result".to_string(),
+        ScanError::Plan(_) | ScanError::Decode(_) | ScanError::Json(_) => error.to_string(),
+    }
+}
+
+fn message_indicates_log_range_limit(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("range")
+        || message.contains("too many")
+        || message.contains("more than")
+        || message.contains("limit")
+        || message.contains("timeout")
+}
+
+fn summarize_http_response(response_text: &str, rpc_url: &str) -> String {
+    let summary = response_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let summary = if summary.is_empty() {
+        "empty response body".to_string()
+    } else {
+        summary.chars().take(240).collect()
+    };
+    redact_rpc_url(&summary, rpc_url)
+}
+
+fn redact_rpc_url(message: &str, rpc_url: &str) -> String {
+    if rpc_url.is_empty() {
+        return message.to_string();
+    }
+    message.replace(rpc_url, "<rpc-url>")
 }
 
 fn block_chunks(from_block: u64, to_block: u64, max_block_range: u64) -> Vec<(u64, u64)> {

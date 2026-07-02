@@ -249,6 +249,10 @@ user/operator `ugraph` CLI:
   which is the append-only entity audit trail.
 - `UGRAPH_MAX_BLOCK_RANGE` and `UGRAPH_RPC_RETRIES` harden RPC log scanning.
 - `UGRAPH_RPC_TIMEOUT_SECS` bounds individual RPC and registry HTTP requests.
+- `UGRAPH_RPC_MIN_INTERVAL_MS` spaces JSON-RPC requests from one process,
+  including log scans, block metadata, and mapping Ethereum calls.
+- `UGRAPH_SYNC_MAX_BLOCKS_PER_PASS` bounds each watch catch-up cycle so
+  checkpoints are persisted incrementally during large gaps.
 - The API exposes `/status` for an HTML operator view, `/healthz` for
   readiness, and `/metrics` for Prometheus.
 

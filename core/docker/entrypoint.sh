@@ -15,6 +15,7 @@ reorg_check_depth="${UGRAPH_REORG_CHECK_DEPTH:-64}"
 history_limit="${UGRAPH_HISTORY_LIMIT:-1024}"
 max_block_range="${UGRAPH_MAX_BLOCK_RANGE:-2000}"
 rpc_retries="${UGRAPH_RPC_RETRIES:-3}"
+max_blocks_per_pass="${UGRAPH_SYNC_MAX_BLOCKS_PER_PASS:-10000}"
 limit="${UGRAPH_SYNC_LIMIT:-1000}"
 log_source="${UGRAPH_LOG_SOURCE:-rpc}"
 
@@ -80,6 +81,7 @@ case "$mode" in
       --reorg-policy "$reorg_policy" --reorg-check-depth "$reorg_check_depth" \
       --history-limit "$history_limit" \
       --max-block-range "$max_block_range" --rpc-retries "$rpc_retries" \
+      --max-blocks-per-pass "$max_blocks_per_pass" \
       --log-source "$log_source"
     if [ "$storage" = "postgres" ]; then
       if [ -z "${UGRAPH_POSTGRES_URL:-}" ]; then

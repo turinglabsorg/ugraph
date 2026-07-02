@@ -68,6 +68,7 @@ pub struct RuntimeHostState {
     pub ethereum_calls: Vec<EthereumCallReport>,
     pub ethereum_call_cache: EthereumCallCache,
     pub rpc_url: Option<String>,
+    pub rpc_urls: Vec<String>,
     pub block_number: Option<u64>,
     pub data_source_address: Option<String>,
     pub data_source_network: Option<String>,
@@ -408,13 +409,37 @@ pub fn execute_matched_log_handler_with_runtime_cache_and_data_source_context(
     runtime_cache: &mut RuntimeModuleCache,
     data_source_context: Option<&EntityData>,
 ) -> Result<HandlerExecutionReport, HandlerExecutionError> {
+    let rpc_urls = rpc_url
+        .map(|rpc_url| vec![rpc_url.to_string()])
+        .unwrap_or_default();
+    execute_matched_log_handler_with_runtime_cache_data_source_context_and_rpc_urls(
+        wasm_path,
+        log,
+        entity_store,
+        &rpc_urls,
+        ethereum_call_cache,
+        runtime_cache,
+        data_source_context,
+    )
+}
+
+pub fn execute_matched_log_handler_with_runtime_cache_data_source_context_and_rpc_urls(
+    wasm_path: impl AsRef<Path>,
+    log: &MatchedLog,
+    entity_store: &mut EntityStore,
+    rpc_urls: &[String],
+    ethereum_call_cache: &mut EthereumCallCache,
+    runtime_cache: &mut RuntimeModuleCache,
+    data_source_context: Option<&EntityData>,
+) -> Result<HandlerExecutionReport, HandlerExecutionError> {
     let wasm_path = wasm_path.as_ref();
     let mut stub = instantiate_wasm_path_with_cache(runtime_cache, wasm_path)?;
     {
         let state = stub.store.data_mut();
         state.store = entity_store.clone();
         state.ethereum_call_cache = ethereum_call_cache.clone();
-        state.rpc_url = rpc_url.map(str::to_string);
+        state.rpc_url = rpc_urls.first().cloned();
+        state.rpc_urls = rpc_urls.to_vec();
         state.block_number = log.block_number;
         state.data_source_address = Some(log.address.clone());
         state.data_source_network = log.network.clone();

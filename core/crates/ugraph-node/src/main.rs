@@ -10,8 +10,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use ugraph_core::{
     build_indexing_plan, instantiate_dynamic_source, latest_block_number, resolve_rpc_urls,
-    scan_planned_source, scan_raw_logs, scan_static_sources, EntitySchema, Manifest, MatchedLog,
-    RpcResolverOptions, ScanOptions, ScanReport, ScanSourceReport, SourcePlan,
+    scan_planned_source, scan_raw_logs, scan_static_sources, throttle_rpc_request, EntitySchema,
+    Manifest, MatchedLog, RpcResolverOptions, ScanOptions, ScanReport, ScanSourceReport,
+    SourcePlan,
 };
 use ugraph_service::{server, state, storage};
 
@@ -103,6 +104,12 @@ enum Command {
         max_block_range: u64,
         #[arg(long, env = "UGRAPH_RPC_RETRIES", default_value_t = 3)]
         rpc_retries: u32,
+        #[arg(
+            long,
+            env = "UGRAPH_SYNC_MAX_BLOCKS_PER_PASS",
+            default_value_t = 10_000
+        )]
+        max_blocks_per_pass: u64,
         #[arg(long)]
         strict_schema: bool,
         #[arg(long)]
@@ -177,7 +184,7 @@ struct ReplayInput {
     manifest: PathBuf,
     build_dir: PathBuf,
     chain_id: u64,
-    rpc_url: Option<String>,
+    rpc_urls: Vec<String>,
     log_source: LogSource,
     from_block: Option<u64>,
     to_block: Option<u64>,
@@ -214,7 +221,7 @@ struct ChainReaderInput {
 struct SourceScanInput<'a> {
     log_source: &'a LogSource,
     chain_id: u64,
-    rpc_url: &'a str,
+    rpc_urls: &'a [String],
     source: &'a SourcePlan,
     from_block: Option<u64>,
     to_block: u64,
@@ -251,6 +258,7 @@ struct SyncOnceInput<'a> {
     history_limit: usize,
     max_block_range: u64,
     rpc_retries: u32,
+    max_blocks_per_pass: u64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -293,6 +301,7 @@ fn main() -> anyhow::Result<()> {
             history_limit,
             max_block_range,
             rpc_retries,
+            max_blocks_per_pass,
             strict_schema,
             json,
         } => {
@@ -319,6 +328,7 @@ fn main() -> anyhow::Result<()> {
                     history_limit,
                     max_block_range,
                     rpc_retries,
+                    max_blocks_per_pass,
                 });
                 match result {
                     Ok(snapshot) => {
@@ -470,10 +480,9 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
     let plan = build_indexing_plan(&input.manifest)?;
     let mut feed_backfill_pending = false;
     let scan = match &input.log_source {
-        LogSource::Rpc => scan_static_sources_with_fallback(
+        LogSource::Rpc => scan_static_sources_with_candidates(
             input.manifest.clone(),
-            input.chain_id,
-            input.rpc_url.clone(),
+            &input.rpc_urls,
             input.from_block,
             input.to_block,
             input.max_block_range,
@@ -483,7 +492,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
             postgres_url,
             deployment,
         } => {
-            let rpc_url = resolve_primary_rpc_url(input.chain_id, input.rpc_url.clone())?;
+            let rpc_url = primary_rpc_url(&input.rpc_urls)?.to_string();
             let to_block = match input.to_block {
                 Some(to_block) => to_block,
                 None => storage::latest_feed_block(postgres_url, input.chain_id)?
@@ -535,6 +544,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
             }
         }
     };
+    let replay_rpc_urls = preferred_rpc_candidates(&input.rpc_urls, &scan.rpc_url);
 
     let mut executions = Vec::new();
     let mut entity_store = input.initial_store;
@@ -572,7 +582,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         let dynamic_scan = scan_source_for_replay(SourceScanInput {
             log_source: &input.log_source,
             chain_id: input.chain_id,
-            rpc_url: &scan.rpc_url,
+            rpc_urls: &replay_rpc_urls,
             source: &source,
             from_block: scan.from_block,
             to_block: scan.to_block,
@@ -597,7 +607,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         let mut runtime_log = log.clone();
         if let Some(block_number) = runtime_log.block_number {
             let block_metadata =
-                cached_block_metadata(&mut block_metadata_cache, &scan.rpc_url, block_number)
+                cached_block_metadata(&mut block_metadata_cache, &replay_rpc_urls, block_number)
                     .unwrap_or_default();
             if runtime_log.block_hash.is_none() {
                 runtime_log.block_hash = block_metadata.hash;
@@ -611,16 +621,15 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         let mut candidate_call_cache = ethereum_call_cache.clone();
         let data_source_context =
             dynamic_source_contexts.get(&dynamic_source_key(&log.source, &log.address));
-        let mut execution =
-            ugraph_runtime::execute_matched_log_handler_with_runtime_cache_and_data_source_context(
-                wasm_path,
-                &runtime_log,
-                &mut candidate_store,
-                Some(&scan.rpc_url),
-                &mut candidate_call_cache,
-                &mut runtime_cache,
-                data_source_context,
-            )?;
+        let mut execution = ugraph_runtime::execute_matched_log_handler_with_runtime_cache_data_source_context_and_rpc_urls(
+            wasm_path,
+            &runtime_log,
+            &mut candidate_store,
+            &replay_rpc_urls,
+            &mut candidate_call_cache,
+            &mut runtime_cache,
+            data_source_context,
+        )?;
         ugraph_runtime::validate_store_sets(&schema, &mut execution.store_sets);
         let execution_validation_errors = validation_error_count(&execution);
         validation_errors += execution_validation_errors;
@@ -654,7 +663,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
             let mut dynamic_scan = scan_source_for_replay(SourceScanInput {
                 log_source: &input.log_source,
                 chain_id: input.chain_id,
-                rpc_url: &scan.rpc_url,
+                rpc_urls: &replay_rpc_urls,
                 source: &source,
                 from_block: Some(creation_block),
                 to_block: scan.to_block,
@@ -692,7 +701,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
                 continue;
             }
             let block_metadata =
-                cached_block_metadata(&mut block_metadata_cache, &scan.rpc_url, block_number)
+                cached_block_metadata(&mut block_metadata_cache, &replay_rpc_urls, block_number)
                     .unwrap_or_default();
             push_history_snapshot(
                 &mut history,
@@ -720,7 +729,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
             .all(|log| processed_logs.contains(&log_identity(log)));
 
     let current_block_metadata =
-        cached_block_metadata(&mut block_metadata_cache, &scan.rpc_url, scan.to_block)
+        cached_block_metadata(&mut block_metadata_cache, &replay_rpc_urls, scan.to_block)
             .unwrap_or_default();
     let block_hash = current_block_metadata
         .hash
@@ -734,7 +743,7 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
         });
     let block_timestamp = current_block_metadata.timestamp;
     let report = ReplayReport {
-        rpc_url: scan.rpc_url,
+        rpc_url: rpc_endpoint_label(&scan.rpc_url),
         from_block: scan.from_block,
         to_block: scan.to_block,
         scanned_logs: pending_logs.len(),
@@ -757,20 +766,16 @@ fn run_replay(input: ReplayInput) -> anyhow::Result<ReplayRun> {
     })
 }
 
-fn scan_static_sources_with_fallback(
+fn scan_static_sources_with_candidates(
     manifest: PathBuf,
-    chain_id: u64,
-    rpc_url: Option<String>,
+    rpc_urls: &[String],
     from_block: Option<u64>,
     to_block: Option<u64>,
     max_block_range: u64,
     rpc_retries: u32,
 ) -> anyhow::Result<ScanReport> {
-    let mut rpc_opts = RpcResolverOptions::for_chain(chain_id);
-    rpc_opts.explicit_rpc_url = rpc_url;
-    let resolved = resolve_rpc_urls(rpc_opts)?;
     let mut last_scan_error = None;
-    for rpc_url in resolved.urls {
+    for rpc_url in rpc_urls {
         match scan_static_sources(ScanOptions {
             manifest: manifest.clone(),
             rpc_url: rpc_url.clone(),
@@ -781,8 +786,10 @@ fn scan_static_sources_with_fallback(
         }) {
             Ok(report) => return Ok(report),
             Err(error) => {
-                last_scan_error =
-                    Some(anyhow::Error::new(error).context(format!("scanning RPC {rpc_url}")));
+                last_scan_error = Some(anyhow::Error::new(error).context(format!(
+                    "scanning RPC candidate {}",
+                    rpc_endpoint_label(rpc_url)
+                )));
             }
         }
     }
@@ -791,14 +798,29 @@ fn scan_static_sources_with_fallback(
 
 fn scan_source_for_replay(input: SourceScanInput<'_>) -> anyhow::Result<ScanSourceReport> {
     match input.log_source {
-        LogSource::Rpc => Ok(scan_planned_source(
-            input.rpc_url,
-            input.source,
-            input.from_block,
-            input.to_block,
-            input.max_block_range,
-            input.rpc_retries,
-        )?),
+        LogSource::Rpc => {
+            let mut last_scan_error = None;
+            for rpc_url in input.rpc_urls {
+                match scan_planned_source(
+                    rpc_url,
+                    input.source,
+                    input.from_block,
+                    input.to_block,
+                    input.max_block_range,
+                    input.rpc_retries,
+                ) {
+                    Ok(report) => return Ok(report),
+                    Err(error) => {
+                        last_scan_error = Some(anyhow::Error::new(error).context(format!(
+                            "scanning dynamic source {} with RPC candidate {}",
+                            input.source.name,
+                            rpc_endpoint_label(rpc_url)
+                        )));
+                    }
+                }
+            }
+            Err(last_scan_error.unwrap_or_else(|| anyhow::anyhow!("no RPC URLs resolved")))
+        }
         LogSource::PostgresFeed {
             postgres_url,
             deployment,
@@ -959,7 +981,8 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
     } else {
         input.store.try_load()?
     };
-    let previous = apply_reorg_policy(loaded, &input)?;
+    let rpc_urls = resolve_rpc_url_candidates(input.chain_id, input.rpc_url.clone())?;
+    let previous = apply_reorg_policy(loaded, &input, &rpc_urls)?;
     let initial_store = previous
         .as_ref()
         .map(entity_store_from_snapshot)
@@ -974,14 +997,23 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         .map(processed_log_set)
         .unwrap_or_default();
     let from_block = sync_start_block(input.from_block, previous.as_ref(), input.reset);
+    let to_block = match input.log_source {
+        LogSource::Rpc => bounded_sync_to_block(
+            &rpc_urls,
+            from_block,
+            input.to_block,
+            input.max_blocks_per_pass,
+        )?,
+        LogSource::PostgresFeed { .. } => input.to_block,
+    };
     let run = run_replay(ReplayInput {
         manifest: input.manifest.to_path_buf(),
         build_dir: input.build_dir.to_path_buf(),
         chain_id: input.chain_id,
-        rpc_url: input.rpc_url,
+        rpc_urls,
         log_source: input.log_source.clone(),
         from_block,
-        to_block: input.to_block,
+        to_block,
         limit: input.limit,
         max_block_range: input.max_block_range,
         rpc_retries: input.rpc_retries,
@@ -1042,6 +1074,38 @@ fn sync_once(input: SyncOnceInput<'_>) -> anyhow::Result<state::StoreSnapshot> {
         input.reset,
     )?;
     Ok(snapshot)
+}
+
+fn bounded_sync_to_block(
+    rpc_urls: &[String],
+    from_block: Option<u64>,
+    explicit_to_block: Option<u64>,
+    max_blocks_per_pass: u64,
+) -> anyhow::Result<Option<u64>> {
+    if explicit_to_block.is_some() || max_blocks_per_pass == 0 {
+        return Ok(explicit_to_block);
+    }
+    let Some(from_block) = from_block else {
+        return Ok(None);
+    };
+    let head = latest_block_number_with_fallback(rpc_urls)?;
+    if from_block > head {
+        return Ok(Some(head));
+    }
+    Ok(Some(bounded_to_block_from_head(
+        from_block,
+        head,
+        max_blocks_per_pass,
+    )))
+}
+
+fn bounded_to_block_from_head(from_block: u64, head: u64, max_blocks_per_pass: u64) -> u64 {
+    if from_block > head {
+        return head;
+    }
+    from_block
+        .saturating_add(max_blocks_per_pass.saturating_sub(1))
+        .min(head)
 }
 
 fn should_keep_previous_checkpoint(
@@ -1126,13 +1190,12 @@ fn push_history_snapshot(
 fn apply_reorg_policy(
     snapshot: Option<state::StoreSnapshot>,
     input: &SyncOnceInput<'_>,
+    rpc_urls: &[String],
 ) -> anyhow::Result<Option<state::StoreSnapshot>> {
     let Some(snapshot) = snapshot else {
         return Ok(None);
     };
-    let Some(mismatch) =
-        checkpoint_reorg_mismatch(&snapshot, input.chain_id, input.rpc_url.clone())?
-    else {
+    let Some(mismatch) = checkpoint_reorg_mismatch(&snapshot, rpc_urls)? else {
         return Ok(Some(snapshot));
     };
 
@@ -1144,8 +1207,7 @@ fn apply_reorg_policy(
             mismatch.rpc_hash,
             mismatch.rpc_url
         ),
-        ReorgPolicy::Rollback => match rollback_reorg_snapshot(&snapshot, input, &mismatch.rpc_url)?
-        {
+        ReorgPolicy::Rollback => match rollback_reorg_snapshot(&snapshot, input, rpc_urls)? {
             Some(rolled_back) => Ok(Some(rolled_back)),
             None => anyhow::bail!(
                 "checkpoint reorg detected at block {}, but no retained safe checkpoint was found in the last {} historical snapshots; use --reorg-policy reset to rebuild from scratch",
@@ -1174,15 +1236,16 @@ fn apply_reorg_policy(
 fn rollback_reorg_snapshot(
     snapshot: &state::StoreSnapshot,
     input: &SyncOnceInput<'_>,
-    rpc_url: &str,
+    rpc_urls: &[String],
 ) -> anyhow::Result<Option<state::StoreSnapshot>> {
     for historical in snapshot.history.iter().rev().take(input.reorg_check_depth) {
         let Some(stored_hash) = historical.checkpoint.block_hash.as_deref() else {
             continue;
         };
         let block_number = historical.checkpoint.to_block;
-        let rpc_hash = fetch_block_hash(rpc_url, block_number)?;
-        if block_hash_mismatch(block_number, stored_hash, rpc_hash, rpc_url.to_string()).is_none() {
+        let rpc_hash = fetch_block_hash_with_fallback(rpc_urls, block_number)?;
+        let rpc_label = rpc_candidates_label(rpc_urls);
+        if block_hash_mismatch(block_number, stored_hash, rpc_hash, rpc_label.clone()).is_none() {
             let rolled_back = rollback_to_historical_snapshot(snapshot, historical);
             eprintln!(
                 "{}",
@@ -1193,7 +1256,7 @@ fn rollback_reorg_snapshot(
                     "fromBlock": snapshot.checkpoint.to_block,
                     "toBlock": rolled_back.checkpoint.to_block,
                     "blockHash": stored_hash,
-                    "rpcUrl": rpc_url
+                    "rpcUrl": rpc_label
                 })
             );
             return Ok(Some(rolled_back));
@@ -1217,20 +1280,18 @@ fn rollback_to_historical_snapshot(
 
 fn checkpoint_reorg_mismatch(
     snapshot: &state::StoreSnapshot,
-    chain_id: u64,
-    rpc_url: Option<String>,
+    rpc_urls: &[String],
 ) -> anyhow::Result<Option<CheckpointReorgMismatch>> {
     let Some(stored_hash) = snapshot.checkpoint.block_hash.as_deref() else {
         return Ok(None);
     };
-    let rpc_url = resolve_primary_rpc_url(chain_id, rpc_url)?;
     let block_number = snapshot.checkpoint.to_block;
-    let rpc_hash = fetch_block_hash(&rpc_url, block_number)?;
+    let rpc_hash = fetch_block_hash_with_fallback(rpc_urls, block_number)?;
     Ok(block_hash_mismatch(
         block_number,
         stored_hash,
         rpc_hash,
-        rpc_url,
+        rpc_candidates_label(rpc_urls),
     ))
 }
 
@@ -1253,13 +1314,6 @@ fn block_hash_mismatch(
     }
 }
 
-fn resolve_primary_rpc_url(chain_id: u64, rpc_url: Option<String>) -> anyhow::Result<String> {
-    resolve_rpc_url_candidates(chain_id, rpc_url)?
-        .into_iter()
-        .next()
-        .context("no RPC URLs resolved")
-}
-
 fn resolve_rpc_url_candidates(
     chain_id: u64,
     rpc_url: Option<String>,
@@ -1271,6 +1325,57 @@ fn resolve_rpc_url_candidates(
         anyhow::bail!("no RPC URLs resolved");
     }
     Ok(resolved.urls)
+}
+
+fn primary_rpc_url(rpc_urls: &[String]) -> anyhow::Result<&str> {
+    rpc_urls
+        .first()
+        .map(String::as_str)
+        .context("no RPC URLs resolved")
+}
+
+fn preferred_rpc_candidates(rpc_urls: &[String], preferred: &str) -> Vec<String> {
+    let mut ordered = Vec::new();
+    if !preferred.trim().is_empty() {
+        ordered.push(preferred.to_string());
+    }
+    for rpc_url in rpc_urls {
+        if !ordered.iter().any(|candidate| candidate == rpc_url) {
+            ordered.push(rpc_url.clone());
+        }
+    }
+    ordered
+}
+
+fn latest_block_number_with_fallback(rpc_urls: &[String]) -> anyhow::Result<u64> {
+    let mut last_error = None;
+    for rpc_url in rpc_urls {
+        match latest_block_number(rpc_url) {
+            Ok(block) => return Ok(block),
+            Err(error) => {
+                last_error = Some(anyhow::Error::new(error).context(format!(
+                    "fetching latest block from RPC candidate {}",
+                    rpc_endpoint_label(rpc_url)
+                )));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no RPC URLs resolved")))
+}
+
+fn rpc_candidates_label(rpc_urls: &[String]) -> String {
+    rpc_urls
+        .iter()
+        .map(|rpc_url| rpc_endpoint_label(rpc_url))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn rpc_endpoint_label(rpc_url: &str) -> String {
+    reqwest::Url::parse(rpc_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "rpc-candidate".to_string())
 }
 
 fn watch_backoff_ms(base_ms: u64, max_ms: u64, failures: u32) -> u64 {
@@ -1321,19 +1426,45 @@ fn log_source_for_sync(kind: LogSourceKind, store: &SnapshotStore) -> anyhow::Re
 
 fn cached_block_metadata(
     cache: &mut BTreeMap<u64, BlockMetadata>,
-    rpc_url: &str,
+    rpc_urls: &[String],
     block_number: u64,
 ) -> anyhow::Result<BlockMetadata> {
     if let Some(metadata) = cache.get(&block_number) {
         return Ok(metadata.clone());
     }
-    let metadata = fetch_block_metadata(rpc_url, block_number)?;
+    let metadata = fetch_block_metadata_with_fallback(rpc_urls, block_number)?;
     cache.insert(block_number, metadata.clone());
     Ok(metadata)
 }
 
 fn fetch_block_hash(rpc_url: &str, block_number: u64) -> anyhow::Result<Option<String>> {
     Ok(fetch_block_metadata(rpc_url, block_number)?.hash)
+}
+
+fn fetch_block_hash_with_fallback(
+    rpc_urls: &[String],
+    block_number: u64,
+) -> anyhow::Result<Option<String>> {
+    Ok(fetch_block_metadata_with_fallback(rpc_urls, block_number)?.hash)
+}
+
+fn fetch_block_metadata_with_fallback(
+    rpc_urls: &[String],
+    block_number: u64,
+) -> anyhow::Result<BlockMetadata> {
+    let mut last_error = None;
+    for rpc_url in rpc_urls {
+        match fetch_block_metadata(rpc_url, block_number) {
+            Ok(metadata) => return Ok(metadata),
+            Err(error) => {
+                last_error = Some(error.context(format!(
+                    "fetching block {block_number} from RPC candidate {}",
+                    rpc_endpoint_label(rpc_url)
+                )));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no RPC URLs resolved")))
 }
 
 fn fetch_block_metadata(rpc_url: &str, block_number: u64) -> anyhow::Result<BlockMetadata> {
@@ -1346,14 +1477,20 @@ fn fetch_block_metadata(rpc_url: &str, block_number: u64) -> anyhow::Result<Bloc
         "method": "eth_getBlockByNumber",
         "params": [format!("0x{block_number:x}"), false],
     });
+    throttle_rpc_request();
     let response = client
         .post(rpc_url)
         .json(&body)
         .send()
-        .with_context(|| format!("fetching block {block_number} from {rpc_url}"))?
-        .error_for_status()
-        .with_context(|| format!("RPC returned an error status for block {block_number}"))?
-        .json::<serde_json::Value>()
+        .with_context(|| format!("fetching block {block_number}"))?;
+    let status = response.status();
+    let response_text = response
+        .text()
+        .with_context(|| format!("reading block {block_number} response"))?;
+    if !status.is_success() {
+        anyhow::bail!("RPC returned HTTP status {status} for block {block_number}");
+    }
+    let response = serde_json::from_str::<serde_json::Value>(&response_text)
         .with_context(|| format!("decoding block {block_number} response"))?;
     if response.get("error").is_some() {
         return Ok(BlockMetadata::default());
@@ -1513,6 +1650,13 @@ mod tests {
         assert_eq!(watch_backoff_ms(1_000, 60_000, 2), 2_000);
         assert_eq!(watch_backoff_ms(1_000, 60_000, 3), 4_000);
         assert_eq!(watch_backoff_ms(1_000, 5_000, 5), 5_000);
+    }
+
+    #[test]
+    fn bounded_to_block_caps_watch_passes() {
+        assert_eq!(bounded_to_block_from_head(100, 1_000, 10), 109);
+        assert_eq!(bounded_to_block_from_head(100, 105, 10), 105);
+        assert_eq!(bounded_to_block_from_head(110, 105, 10), 105);
     }
 
     #[test]

@@ -64,7 +64,7 @@ docker compose -f core/docker-compose.yml up --build
 
 ```bash
 UGRAPH_CHAIN_ID=11155111
-UGRAPH_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+UGRAPH_RPC_URL=
 UGRAPH_STATE_FILE=.ugraph/state.json
 UGRAPH_STORAGE=json
 UGRAPH_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres
@@ -78,6 +78,8 @@ UGRAPH_HISTORY_LIMIT=1024
 UGRAPH_MAX_BLOCK_RANGE=2000
 UGRAPH_RPC_RETRIES=3
 UGRAPH_RPC_TIMEOUT_SECS=15
+UGRAPH_RPC_MIN_INTERVAL_MS=0
+UGRAPH_SYNC_MAX_BLOCKS_PER_PASS=10000
 UGRAPH_DEPLOY_MAX_PASSES=8
 UGRAPH_SYNC_LIMIT=1000
 UGRAPH_API_KEY=
@@ -126,6 +128,10 @@ not include the user/operator `ugraph` CLI from `cli/`:
 - `UGRAPH_MAX_BLOCK_RANGE` chunks `eth_getLogs` ranges for provider safety.
 - `UGRAPH_RPC_RETRIES` retries transient RPC and HTTP failures.
 - `UGRAPH_RPC_TIMEOUT_SECS` bounds individual RPC and registry HTTP requests.
+- `UGRAPH_RPC_MIN_INTERVAL_MS` spaces JSON-RPC requests from one process to
+  protect low-rate providers.
+- `UGRAPH_SYNC_MAX_BLOCKS_PER_PASS` bounds each `sync --watch` catch-up pass
+  so long-running indexers persist regular checkpoints while catching up.
 - `UGRAPH_IPFS_GATEWAY` configures the gateway used by `ipfs.cat`,
   `ipfs.getBlock`, and `ipfs.map`; it can be a prefix or contain a `{path}`
   placeholder.
@@ -352,7 +358,12 @@ sources. `--limit` is treated as a soft cap at block boundaries: once a block
 starts, all remaining logs in that block are processed before the run stops,
 and retained historical snapshots are only written after a complete block.
 `eth_getLogs` ranges are chunked with `UGRAPH_MAX_BLOCK_RANGE`, retried with
-`UGRAPH_RPC_RETRIES`, and split further on provider range-limit failures.
+`UGRAPH_RPC_RETRIES`, optionally paced with `UGRAPH_RPC_MIN_INTERVAL_MS`, and
+split further on provider range-limit failures. The same per-process pacing is
+applied to block metadata requests and mapping `ethereum.call` RPC requests.
+In watch mode, `UGRAPH_SYNC_MAX_BLOCKS_PER_PASS` bounds each automatic catch-up
+cycle so checkpoints are persisted incrementally instead of only after reaching
+the chain head.
 Before resuming from a stored checkpoint, `sync` compares the checkpoint block
 hash against the selected RPC. The default `rollback` policy probes retained
 historical checkpoints and rewinds to the newest checkpoint whose hash still

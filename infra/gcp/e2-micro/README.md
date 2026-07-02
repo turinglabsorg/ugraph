@@ -41,9 +41,11 @@ ZONE=us-central1-a \
 infra/gcp/e2-micro/scripts/deploy-chain.sh infra/gcp/e2-micro/chains/sepolia.yaml
 ```
 
-Chain-specific values live in `chains/*.yaml`, not in `.env`. If `rpc_url` is
-empty, `ugraph` resolves RPC endpoints from Chainlist. For production indexing,
-prefer an explicit RPC URL to avoid public endpoint rate limits.
+Use `chains/ethereum.yaml` for Ethereum mainnet and `chains/sepolia.yaml` for
+Ethereum Sepolia. Chain-specific values live in `chains/*.yaml`, not in
+`.env`. If `rpc_url` is empty, `ugraph` resolves RPC endpoints from Chainlist.
+For production indexing, pass an explicit `UGRAPH_RPC_URL` through the
+environment or the server `.env`; do not commit provider URLs or keys.
 
 The script creates or reuses:
 

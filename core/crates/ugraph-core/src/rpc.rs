@@ -1,10 +1,17 @@
-use std::time::Duration;
+use std::{
+    sync::{Mutex, OnceLock},
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DEFAULT_CHAINLIST_REGISTRY_URL: &str = "https://chainid.network/chains.json";
 const DEFAULT_RPC_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_RPC_MIN_INTERVAL_MS: u64 = 0;
+
+static RPC_REQUEST_THROTTLE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +131,36 @@ fn rpc_timeout() -> Duration {
     Duration::from_secs(seconds)
 }
 
+pub fn rpc_min_interval() -> Duration {
+    parse_rpc_min_interval_ms(std::env::var("UGRAPH_RPC_MIN_INTERVAL_MS").ok())
+}
+
+pub fn throttle_rpc_request() {
+    let min_interval = rpc_min_interval();
+    if min_interval.is_zero() {
+        return;
+    }
+
+    let throttle = RPC_REQUEST_THROTTLE.get_or_init(|| Mutex::new(None));
+    let Ok(mut last_request_at) = throttle.lock() else {
+        return;
+    };
+    if let Some(last_request_at) = *last_request_at {
+        let elapsed = last_request_at.elapsed();
+        if elapsed < min_interval {
+            thread::sleep(min_interval - elapsed);
+        }
+    }
+    *last_request_at = Some(Instant::now());
+}
+
+fn parse_rpc_min_interval_ms(value: Option<String>) -> Duration {
+    let milliseconds = value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_MIN_INTERVAL_MS);
+    Duration::from_millis(milliseconds)
+}
+
 pub fn rpc_urls_from_chainlist_json(
     json: &str,
     chain_id: u64,
@@ -184,5 +221,18 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn parses_rpc_min_interval_ms() {
+        assert_eq!(
+            parse_rpc_min_interval_ms(Some("250".to_string())),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            parse_rpc_min_interval_ms(Some("".to_string())),
+            Duration::from_millis(0)
+        );
+        assert_eq!(parse_rpc_min_interval_ms(None), Duration::from_millis(0));
     }
 }
