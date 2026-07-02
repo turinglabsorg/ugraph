@@ -9,6 +9,10 @@
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 	}
 
+	handle /subgraphs/growfi-sepolia/* {
+		reverse_proxy api-sepolia:8030
+	}
+
 	reverse_proxy api:8030
 
 	handle_errors {

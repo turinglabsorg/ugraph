@@ -205,6 +205,11 @@
   Ethereum mainnet. Keep `rpc_url` empty when relying on dynamic Chainlist
   fallback; inject explicit provider URLs through environment/server `.env`
   only, never as committed secrets.
+- The GrowFi e2-micro deployment serves both networks from the same Postgres
+  and host: mainnet uses `api`/`indexer` with deployment `growfi`, while
+  Sepolia uses `api-sepolia`/`indexer-sepolia` with deployment
+  `growfi-sepolia`. Caddy routes `/subgraphs/growfi-sepolia/*` to
+  `api-sepolia`; do not replace the mainnet services when refreshing Sepolia.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`
   matched through `ugraph compare` for `_meta(block:)`, `campaigns(block:,
   where: id_in, orderBy:)`, `acceptedTokens`, `purchases`, and
