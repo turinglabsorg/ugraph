@@ -88,6 +88,16 @@
 - `core scan/sync` chunks `eth_getLogs` with `UGRAPH_MAX_BLOCK_RANGE`, retries
   transient RPC failures with `UGRAPH_RPC_RETRIES`, bounds individual requests
   with `UGRAPH_RPC_TIMEOUT_SECS`, and splits range-limit failures recursively.
+- When `UGRAPH_RPC_URL` is empty, `core sync` resolves Ethereum RPC candidates
+  from Chainlist for the configured `UGRAPH_CHAIN_ID`. Static scans, dynamic
+  data-source scans, latest-block reads, checkpoint/reorg block metadata, and
+  mapping `ethereum.call`/`ethereum.hasCode` calls must retry the next resolved
+  RPC peer on transient provider failures instead of advancing cursors with
+  missing logs. `UGRAPH_RPC_MIN_INTERVAL_MS` applies per-process pacing across
+  these JSON-RPC requests for low-rate providers.
+- `UGRAPH_SYNC_MAX_BLOCKS_PER_PASS` bounds each watch-mode catch-up pass so
+  long mainnet gaps persist incremental checkpoints before the indexer reaches
+  the current head.
 - `core sync` checks the stored checkpoint block hash before resuming.
   `UGRAPH_REORG_POLICY=fail|rollback|reset` controls mismatch behavior.
   `rollback` probes retained checkpoints up to `UGRAPH_REORG_CHECK_DEPTH` and
@@ -187,6 +197,14 @@
 - The live GrowFi fixture tracks the Sepolia `4.0.3` refresh from block
   `10838711`; reset the `growfi` deployment before switching away from older
   fixture versions so stale checkpoints do not resume past the new start block.
+- GrowFi network fixtures are Ethereum only: `core/examples/growfi/` is
+  Ethereum Sepolia (`chain_id=11155111`) and `core/examples/growfi-mainnet/` is
+  Ethereum mainnet (`chain_id=1`). Do not use Base Sepolia for GrowFi.
+- The GCP e2-micro chain manifests live under `infra/gcp/e2-micro/chains/`.
+  Use `sepolia.yaml` for Ethereum Sepolia and `ethereum.yaml` for GrowFi
+  Ethereum mainnet. Keep `rpc_url` empty when relying on dynamic Chainlist
+  fallback; inject explicit provider URLs through environment/server `.env`
+  only, never as committed secrets.
 - A fixed-block smoke diff against Goldsky `growfi/4.0.2` at block `10846000`
   matched through `ugraph compare` for `_meta(block:)`, `campaigns(block:,
   where: id_in, orderBy:)`, `acceptedTokens`, `purchases`, and
