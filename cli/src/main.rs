@@ -3598,16 +3598,20 @@ fn remote_post<T: Serialize>(
     body: &T,
 ) -> anyhow::Result<serde_json::Value> {
     let url = remote_url(endpoint, path);
-    reqwest::blocking::Client::new()
+    let response = reqwest::blocking::Client::new()
         .post(&url)
         .bearer_auth(api_key)
         .json(body)
         .send()
-        .with_context(|| format!("posting {url}"))?
-        .error_for_status()
-        .with_context(|| format!("remote returned an error status from {url}"))?
-        .json()
-        .with_context(|| format!("decoding JSON response from {url}"))
+        .with_context(|| format!("posting {url}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .with_context(|| format!("reading response body from {url}"))?;
+    if !status.is_success() {
+        anyhow::bail!("remote returned {status} from {url}: {text}");
+    }
+    serde_json::from_str(&text).with_context(|| format!("decoding JSON response from {url}"))
 }
 
 fn remote_url(endpoint: &str, path: &str) -> String {
