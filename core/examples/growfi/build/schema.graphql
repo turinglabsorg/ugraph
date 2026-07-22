@@ -18,7 +18,7 @@ type Campaign @entity(immutable: false) {
   seasonDuration: BigInt!
   minProductClaim: BigInt!
 
-  # v3 — productive-asset commitments (set at creation, immutable).
+  # v3 — productive-asset commitments (set at creation, producer-adjustable before collateral is locked).
   expectedAnnualHarvestUsd: BigInt!
   expectedAnnualHarvest: BigInt!
   firstHarvestYear: BigInt!
@@ -33,6 +33,15 @@ type Campaign @entity(immutable: false) {
   totalRaised: BigInt!                    # USD-18 sum across all buys (direct + treasury)
   treasuryRaised: BigInt!                 # USD-18 sum of buys where buyer == GrowfiTreasury
   treasuryTokensOut: BigInt!              # raw CampaignTokens (18-dec) minted to the Treasury
+  directIssuedTokens: BigInt!             # raw CampaignTokens issued off-chain via DirectIssueModule
+  directIssueCount: Int!
+  projectUpdateCount: Int!
+  visibleProjectUpdateCount: Int!
+  proceedsSplitActive: Boolean!
+  proceedsSplitPromoter: Bytes
+  proceedsSplitPromoterBps: Int!
+  proceedsSplitProducerBps: Int!
+  proceedsSplitUpdatedAt: BigInt
   currentYieldRate: BigInt!
   currentSeasonId: BigInt!
   state: String!                          # "Funding" | "Active" | "Buyback" | "Ended"
@@ -50,6 +59,7 @@ type Campaign @entity(immutable: false) {
 
   acceptedTokens: [AcceptedToken!]! @derivedFrom(field: "campaign")
   purchases: [Purchase!]! @derivedFrom(field: "campaign")
+  directIssues: [DirectIssue!]! @derivedFrom(field: "campaign")
   positions: [Position!]! @derivedFrom(field: "campaign")
   seasons: [Season!]! @derivedFrom(field: "campaign")
   sellBackOrders: [SellBackOrder!]! @derivedFrom(field: "campaign")
@@ -59,6 +69,7 @@ type Campaign @entity(immutable: false) {
   ecommerceStore: EcommerceStore @derivedFrom(field: "campaign")
   ecommerceSkus: [EcommerceSku!]! @derivedFrom(field: "campaign")
   ecommerceOrders: [EcommerceOrder!]! @derivedFrom(field: "campaign")
+  projectUpdates: [ProjectUpdate!]! @derivedFrom(field: "campaign")
 }
 
 # v4 — module attached to a Campaign via the host's fallback router.
@@ -157,6 +168,22 @@ type EcommerceOrder @entity(immutable: true) {
   transactionHash: Bytes!
 }
 
+# v4 — Producer-authored on-chain project update evidence. Rich body/media stay
+# off-chain at metadataURI; contentHash is keccak256 of the canonical JSON.
+type ProjectUpdate @entity(immutable: false) {
+  id: Bytes!                              # campaign + updateId
+  campaign: Campaign!
+  updateId: BigInt!
+  author: Bytes!
+  metadataURI: String!
+  contentHash: Bytes!
+  hidden: Boolean!
+  postedAt: BigInt!
+  updatedAt: BigInt!
+  block: BigInt!
+  transactionHash: Bytes!
+}
+
 type AcceptedToken @entity(immutable: false) {
   id: Bytes!                              # campaign + token address
   campaign: Campaign!
@@ -190,6 +217,17 @@ type Purchase @entity(immutable: true) {
   fundingFee: BigInt!                     # Portion skimmed to the protocol at buy time (0 for pre-v2 purchases)
   campaignTokensOut: BigInt!
   oraclePriceUsed: BigInt!
+  newCurrentSupply: BigInt!
+  timestamp: BigInt!
+  block: BigInt!
+  transactionHash: Bytes!
+}
+
+type DirectIssue @entity(immutable: true) {
+  id: Bytes!                              # txHash-logIndex
+  campaign: Campaign!
+  recipient: Bytes!
+  amount: BigInt!
   newCurrentSupply: BigInt!
   timestamp: BigInt!
   block: BigInt!
@@ -302,9 +340,21 @@ type Producer @entity(immutable: false) {
   version: BigInt!
   updatedAt: BigInt
 
-  # v3 — KYC verdict from a KYC_ADMIN_ROLE-holder. Defaults to false.
+  # Legacy KYC verdict from a KYC admin. Kept for backward compatibility.
   kyced: Boolean!
   kycSetAt: BigInt
+
+  # v5 — social verification from a trusted social verifier.
+  socialVerified: Boolean!
+  socialVerifiedAt: BigInt
+  socialExpiresAt: BigInt
+  socialPlatform: String
+  socialHandle: String
+  socialProfileUrl: String
+  socialProofUrl: String
+  socialProofHash: Bytes
+  socialAttestationUID: Bytes
+  socialVerifier: Bytes
 }
 
 type GlobalStats @entity(immutable: false) {

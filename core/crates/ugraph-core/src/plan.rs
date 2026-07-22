@@ -169,7 +169,7 @@ mod tests {
                 .iter()
                 .map(|source| source.triggers.len())
                 .sum::<usize>(),
-            77
+            85
         );
         assert!(plan.sources.iter().any(|source| {
             source.name == "CampaignFactory"
@@ -198,7 +198,7 @@ mod tests {
             Some("0x0000000000000000000000000000000000001001")
         );
         assert_eq!(source.start_block, Some(10845481));
-        assert_eq!(source.triggers.len(), 33);
+        assert_eq!(source.triggers.len(), 39);
         Ok(())
     }
 }
