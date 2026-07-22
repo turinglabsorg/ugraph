@@ -194,9 +194,15 @@
   heavy data backfills on every API/status request.
 - Core readiness requires `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
-- The live GrowFi fixture tracks the Sepolia `4.0.3` refresh from block
-  `10838711`; reset the `growfi` deployment before switching away from older
-  fixture versions so stale checkpoints do not resume past the new start block.
+- The live GrowFi Sepolia fixture uses ProducerRegistry
+  `0x52b30540174057756052F676Ed5Fd978E02b939b` from block `11163979`.
+  Reset the `growfi-sepolia` deployment when switching from the previous
+  registry so stale checkpoints do not resume past the new start block.
+- Both GrowFi fixtures expose 85 handlers and index direct CampaignToken
+  issues, producer-adjusted harvest commitments, proceeds splits, project
+  updates, and producer social-attestation set/revoke events. Their schemas
+  include `DirectIssue` and `ProjectUpdate` entities plus campaign counters,
+  split state, and social-verification fields.
 - GrowFi network fixtures are Ethereum only: `core/examples/growfi/` is
   Ethereum Sepolia (`chain_id=11155111`) and `core/examples/growfi-mainnet/` is
   Ethereum mainnet (`chain_id=1`). Do not use Base Sepolia for GrowFi.

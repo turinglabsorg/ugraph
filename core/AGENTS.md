@@ -144,6 +144,12 @@ docker compose -f core/docker-compose.yml up --build
   inline fragments, `@include`, and `@skip`.
 - `ugraph conformance` runs batch hosted-provider diffs from JSON case files.
   The GrowFi fixture cases live at `core/examples/growfi/conformance.json`.
+- The Sepolia and mainnet GrowFi fixtures currently declare 85 event handlers.
+  They index direct CampaignToken issues, harvest-commitment edits, proceeds
+  splits, project updates, and producer social attestations; keep the source
+  schemas, manifests, ABIs, generated build files, and handler-count assertions
+  synchronized when these events change. Sepolia ProducerRegistry starts at
+  block `11163979` on `0x52b30540174057756052F676Ed5Fd978E02b939b`.
 - `ugraph matrix` is the repeatable compatibility gate: it runs structural
   `doctor`, optional bounded sync when `--to-block` is provided, and optional
   GraphQL conformance when both `--endpoint` and `--cases-file` are provided.
